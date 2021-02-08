@@ -1,5 +1,5 @@
 --! Previous: -
---! Hash: sha1:1a0ebc35fabda6559451ef545c657ca9d53d6222
+--! Hash: sha1:43217d7c90df076f71443ebd3e51d30d9aa63194
 
 drop schema if exists app_public cascade;
 drop schema if exists app_hidden cascade;
@@ -204,7 +204,6 @@ CREATE INDEX notification_guild_id_idx
 
 CREATE TABLE app_public.reminders (
     user_id     BIGINT    NOT NULL,
-    channel_id  BIGINT    NOT NULL,
     description TEXT      NOT NULL,
     set_at      TIMESTAMP NOT NULL,
     expire_at   TIMESTAMP NOT NULL,

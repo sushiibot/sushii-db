@@ -70,35 +70,6 @@ SELECT id,
 FROM sushii_old.guilds ON CONFLICT DO NOTHING;
 
 -- MOD LOG cases
--- migrate cases from servers that don't have sushii_2
-insert into app_public.mod_logs (
-                guild_id,
-                case_id,
-                action,
-                action_time,
-                pending,
-                user_id,
-                user_tag,
-                executor_id,
-                reason,
-                msg_id
-            )
-select guild_id,
-       case_id,
-       action,
-       action_time,
-       pending,
-       user_id,
-       user_tag,
-       executor_id,
-       reason,
-       msg_id
-  from sushii_old.mod_log
-  where guild_id not in (
-        select guild_id
-          from sushii_2.mod_logs
-      group by guild_id
-  ) on conflict do nothing;
 
 -- servers that use sushii_2
 -- migrate new cases from sushii_2, and remove the duplicates in sushii_old
@@ -107,25 +78,11 @@ $$
 declare
     f record;
     oldest_case_id int;
-    first_case timestamp;
 begin
     for f in select guild_id
                from sushii_2.mod_logs
            group by guild_id
     loop
-        -- get first case in sushii_2
-          select action_time
-            into first_case
-            from sushii_2.mod_logs
-           where guild_id = f.guild_id
-        order by action_time asc
-           limit 1;
-
-        -- delete cases in sushii_old after first case in sushii_2
-        delete from sushii_old.mod_log
-              where guild_id = f.guild_id
-                and action_time > first_case;
-
         -- get the last case_id from sushii_old
         select max(case_id)
           into oldest_case_id
@@ -133,7 +90,7 @@ begin
          where guild_id = f.guild_id
          limit 1;
 
-        -- add sushii_old cases
+        -- add sushii_old cases, only the ones before first case in sushii_2
         insert into app_public.mod_logs (
                         guild_id,
                         case_id,
@@ -158,7 +115,12 @@ begin
                msg_id
           from sushii_old.mod_log
          where guild_id = f.guild_id
-            on conflict do nothing;
+           and action_time < (
+                   select min(action_time)
+                     from sushii_2.mod_logs
+                    where guild_id = f.guild_id
+               )
+         on conflict do nothing;
 
         -- add sushii_2 cases with the oldest case_id added
         -- case_id starts at 1, so can just do oldest + case_id
@@ -189,6 +151,36 @@ begin
     end loop;
 end
 $$;
+
+-- migrate cases from servers that don't have sushii_2
+insert into app_public.mod_logs (
+                guild_id,
+                case_id,
+                action,
+                action_time,
+                pending,
+                user_id,
+                user_tag,
+                executor_id,
+                reason,
+                msg_id
+            )
+select guild_id,
+       case_id,
+       action,
+       action_time,
+       pending,
+       user_id,
+       user_tag,
+       executor_id,
+       reason,
+       msg_id
+  from sushii_old.mod_log
+  where guild_id not in (
+        select guild_id
+          from sushii_2.mod_logs
+      group by guild_id
+  ) on conflict do nothing;
 
 -- SERVER TAGS
 -- add new tags

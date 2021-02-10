@@ -21,7 +21,7 @@ sushii database migrations and database setup.
     # only required in local dev
     createdb sushii_shadow --owner=sushii
     ```
-2. `yarn run raphile-migrate init`
+2. `yarn run graphile-migrate init`
 3. Source .env file and run
     ```bash
     . ./.env
@@ -46,7 +46,6 @@ sushii database migrations and database setup.
       --table=tags \
       --table=users \
       --table=vlive_channels \
-      --inserts \
       sushii > ./sushii_old.sql
 
    # sushii-2
@@ -59,25 +58,30 @@ sushii database migrations and database setup.
       --exclude-table=cached_guilds \
       --exclude-table=messages \
       -U drk \
-      --inserts \
       sushii2 > /root/sushii_2.sql
 
    # remove public schema name
-   sed -i -e 's/public\./sushii_2\./' postgres_root/sushii_2.sql
+   sed -i -e 's/public\./sushii_2\./g' sushii_2.sql
+   sed -i -e 's/public\./sushii_old\./g' sushii_old.sql
    ```
 2. Add temp schema
    ```sql
    drop schema if exists sushii_old;
    create schema sushii_old;
    ```
-
-1. Delete extra settings and stuff on top
-2. Run dumped file
-   ```bash
-   yarn gm run --shadow sushii_2.sql
+3. Delete extra settings and stuff on top
+   ```sql
+   drop schema if exists sushii_2 cascade;
+   create schema sushii_2;
    ```
-3. Repeat with sushii_2 data
-4. Run `migrate.sql` to merge data
+4. Add sushii-2 and sushii-old dumped data
+   ```bash
+   # use psql since using graphile-migrate runs out of memory for big dump
+   # and requires --inserts format which slows things down a LOT
+   psql -U sushii -W -h localhost -d sushii_shadow -f sushii_2.sql
+   psql -U sushii -W -h localhost -d sushii_shadow -f sushii_old_copy.sql
+   ```
+5. Run `migrate.sql` to merge data
    ```bash
    yarn gm run --shadow migrate.sql
    ```

@@ -137,7 +137,7 @@ begin
                         msg_id
                     )
         select guild_id,
-               case_id + oldest_case_id,
+               case_id + coalesce(oldest_case_id, 0), -- oldest_case_id might not exist
                action,
                action_time,
                pending,
@@ -229,20 +229,29 @@ begin
               where sushii_old.tags.tag_name = sushii_2.tags.tag_name
                 and sushii_old.tags.guild_id = sushii_2.tags.guild_id
     loop
-        num := 0;
+        num := 2;
 
         -- try adding tag with oldn appended
         loop
             -- if there is already a tag with oldn appended
             IF EXISTS (
-                select sushii_old.tags.*
-                  from sushii_old.tags, sushii_2.tags
-                 where sushii_old.tags.tag_name = sushii_2.tags.tag_name || 'old' || num
-                   and sushii_old.tags.guild_id = sushii_2.tags.guild_id
+                select
+                  from app_public.tags
+                 where app_public.tags.tag_name = f.tag_name || 'old' || num
+                   and app_public.tags.guild_id = f.guild_id
             ) THEN
+                raise notice 'Conflicting tag name in %: %',
+                    f.guild_id,
+                    f.tag_name || 'old' || num;
+
                 -- inc count
                 num = num + 1;
             ELSE
+                raise notice 'Renaming tag in %: % to %',
+                    f.guild_id,
+                    f.tag_name,
+                    f.tag_name || 'old' || num;
+
                 -- if there isn't one, can add now
                 INSERT INTO app_public.tags
                         VALUES (f.owner_id,
@@ -251,6 +260,9 @@ begin
                                 f.content,
                                 f.count,
                                 f.created);
+
+                -- inserted, so break inner loop and move onto next conflicting tag
+                exit;
             END IF;
         end loop;
     end loop;

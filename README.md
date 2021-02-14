@@ -85,3 +85,15 @@ sushii database migrations and database setup.
    ```bash
    yarn gm run --shadow migrate.sql
    ```
+
+## Deployment
+
+1. Update sushii2 to run any pending migrations in prod
+2. Dump databases to sql files above
+3. Create new db (separate docker service to preserve previous sushii2 db)
+4. Add sushii2 / sushiiold data above
+5. Run `migrate.sql` -- sushii should NOT be running, `yarn reset` if not empty
+6. Update `.env` to use primary token, create `.env_old` for sushii2 token
+7. **Remove sqlx embedded migrations in sushii-2 before connecting to new db**
+8. Create new sushii docker service with sushiiDev token to replace sushiiDev but keep sushii2 running
+9. Update avatar / username

@@ -439,14 +439,6 @@ CREATE INDEX tag_name_idx ON app_public.tags USING gin (tag_name gin_trgm_ops);
 
 
 --
--- Name: feed_items fk_feed_item_feed_id; Type: FK CONSTRAINT; Schema: app_public; Owner: -
---
-
-ALTER TABLE ONLY app_public.feed_items
-    ADD CONSTRAINT fk_feed_item_feed_id FOREIGN KEY (feed_id) REFERENCES app_public.feeds(feed_id) ON DELETE CASCADE;
-
-
---
 -- Name: feed_subscriptions fk_feed_subscription_feed_id; Type: FK CONSTRAINT; Schema: app_public; Owner: -
 --
 

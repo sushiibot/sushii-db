@@ -63,6 +63,7 @@
    */
   "placeholders": {
     ":DATABASE_VISITOR": "!ENV", // Uses process.env.DATABASE_VISITOR
+    ":DATABASE_AUTHENTICATOR": "!ENV",
   },
 
   /*

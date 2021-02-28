@@ -1,6 +1,87 @@
 -- postgraphile auth stuff
+-- and other stuff for reworked sushii-web with postgraphile
 
--- first enable rls for stuff
+-- enable existing public stuff to be viewed
+-- we don't directly use user_levels table, use view below to calculate levels stuff
+-- alter table app_public.user_levels enable row level security;
+
+-- add views and stuff for calculating user XP for leaderboards
+
+-- gets the user's current level from **total** xp
+-- https://gamedev.stackexchange.com/questions/13638/algorithm-for-dynamically-calculating-a-level-based-on-experience-points#comment124885_13639
+-- Equations for the linearly rising level gap. level = (sqrt(100(2experience+25))+50)/100
+drop function if exists app_hidden.level_from_xp(xp bigint) cascade;
+create function app_hidden.level_from_xp(xp bigint) returns bigint as $$
+  select floor((sqrt(100 * (2 * xp + 25)) + 50) / 100)::bigint;
+$$ language sql stable;
+
+-- experience =(level^2+level)/2*100-(level*100)
+drop function if exists app_hidden.xp_from_level(level bigint) cascade;
+create function app_hidden.xp_from_level(level bigint) returns bigint as $$
+  select floor((pow(level, 2) + level) / 2 * 100 - (level * 100))::bigint;
+$$ language sql stable;
+
+-- how much xp a user has progressed in a single level
+-- ie if they are level 2 and they have 150 xp, level 1 required 100xp
+-- this will return 50xp
+drop materialized view if exists app_public.user_levels_global cascade;
+create materialized view app_public.user_levels_global
+    as select t.user_id,
+              avatar_url,
+              name,
+              discriminator,
+              t.xp,
+              current_level,
+              next_level_xp_required,
+              next_level_xp_progress
+         from (select user_id,
+                      sum(msg_all_time) as xp
+                 from app_public.user_levels
+             group by user_id) t
+             -- join the cached users to get username/avatar/discrim
+             left join app_public.cached_users
+                    on user_id = id,
+             -- lateral joins to reuse calculations
+             lateral (select app_hidden.level_from_xp(xp::bigint)
+                             as current_level
+                     ) c,
+             lateral (select (app_hidden.xp_from_level(current_level + 1) - xp)
+                             as next_level_xp_required
+                     ) r,
+             lateral (select (xp - app_hidden.xp_from_level(current_level))
+                             as next_level_xp_progress
+                     ) p
+     order by xp desc,
+              user_id desc
+              with data;
+
+-- required to refresh materialized view concurrently
+create unique index on app_public.user_levels_global(user_id);
+
+comment on materialized view app_public.user_levels_global is
+  E'Global leaderboard for user levels. All XP in each guild is aggregated for each user.';
+grant select on app_public.user_levels_global to :DATABASE_VISITOR;
+
+drop function if exists app_public.user_levels_global_cached_user(
+  user_level app_public.user_levels_global
+) cascade;
+
+create function app_public.user_levels_global_cached_user(
+  user_level app_public.user_levels_global
+) returns app_public.cached_users as $$
+  select *
+    from app_public.cached_users
+   where id = user_level.user_id;
+$$ language sql stable;
+
+grant execute on function app_public.user_levels_global_cached_user(
+  user_level app_public.user_levels_global
+) to :DATABASE_VISITOR;
+
+/**********/
+
+
+-- now auth stuff
 
 /**********/
 drop table if exists app_private.sessions cascade;
@@ -127,6 +208,9 @@ create trigger _100_timestamps
   for each row
   execute procedure app_private.tg__timestamps();
 
+/**********/
+
+-- should only contain guilds with manage guild permissions
 drop table if exists app_public.web_user_guilds cascade;
 create table app_public.web_user_guilds (
     user_id     bigint not null,
@@ -154,7 +238,9 @@ create index on app_public.web_user_guilds (user_id);
 create index on app_public.web_user_guilds (guild_id);
 
 -- get all guild ids a user is in where user has managed_guild permission
--- ignores servers user doesn't have manage_guild in 
+-- ignores servers user doesn't have manage_guild in.
+-- shouldn't be necessary since only guilds are added if user has permission
+-- but this is just in case i guess
 drop function if exists app_public.current_user_managed_guild_ids() cascade;
 create function app_public.current_user_managed_guild_ids() returns setof bigint as $$
   select guild_id
@@ -218,7 +304,11 @@ $$ language plpgsql security definer volatile set search_path to pg_catalog, pub
 
 /**********/
 
-drop function if exists app_public.register_user() cascade;
+drop function if exists app_public.register_user(
+  f_discord_user_id character varying,
+  f_profile json,
+  f_auth_details json
+) cascade;
 create function app_private.register_user(
   f_discord_user_id character varying,
   f_profile json,
@@ -250,17 +340,21 @@ begin
               value->>'name',
               value->>'icon'
          from json_array_elements(v_user_guilds)
+              -- only save guilds where user has manage guild permissions
+        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
            on conflict (id)
               do update
               set name = excluded.name,
                   icon = excluded.icon;
 
-  -- Insert web guilds
+  -- Insert web guilds, should not conflict since new user means they will have no entries
+  -- if this runs into error means it's re-registering a user I think
   insert into app_public.web_user_guilds (user_id, guild_id, permissions)
        select f_discord_user_id::bigint as user_id,
               (value->>'id')::bigint,
               (value->>'permissions')::bigint
-         from json_array_elements(v_user_guilds);
+         from json_array_elements(v_user_guilds)
+        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint;
 
   -- Insert the user’s private account data (e.g. OAuth tokens)
   insert into app_private.user_authentication_secrets (user_id, details)
@@ -279,7 +373,11 @@ comment on function app_private.register_user(f_discord_user_id character varyin
 -- additional oauth accounts if user is already logged in but since we only care
 -- about Discord, if user is already logged in then there is no reason for them
 -- to link another account, there is no other accounts to link
-drop function if exists app_private.login_or_register_user();
+drop function if exists app_private.login_or_register_user(
+  f_discord_user_id character varying,
+  f_profile json,
+  f_auth_details json
+);
 create function app_private.login_or_register_user(
   -- discord id as string, in case any u64 overflows in JS
   f_discord_user_id character varying,
@@ -335,6 +433,7 @@ begin
                 value->>'name',
                 value->>'icon'
            from json_array_elements(v_user_guilds)
+          where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
              on conflict (id)
                 do update
                 set name = excluded.name,
@@ -355,6 +454,8 @@ begin
                 (value->>'id')::bigint,
                 (value->>'permissions')::bigint
            from json_array_elements(v_user_guilds)
+                -- only save guilds where user has manage guild permissions
+                where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
                 on conflict (user_id, guild_id)
                    do update
                    set permissions = excluded.permissions;

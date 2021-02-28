@@ -41,7 +41,7 @@ CREATE SCHEMA app_public;
 -- Name: pg_trgm; Type: EXTENSION; Schema: -; Owner: -
 --
 
-CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA pg_catalog;
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 
 
 --
@@ -49,6 +49,34 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA pg_catalog;
 --
 
 COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching based on trigrams';
+
+
+--
+-- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: uuid-ossp; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION "uuid-ossp"; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION "uuid-ossp" IS 'generate universally unique identifiers (UUIDs)';
 
 
 SET default_tablespace = '';
@@ -435,7 +463,7 @@ CREATE INDEX notification_keyword_idx ON app_public.notifications USING btree (k
 -- Name: tag_name_idx; Type: INDEX; Schema: app_public; Owner: -
 --
 
-CREATE INDEX tag_name_idx ON app_public.tags USING gin (tag_name gin_trgm_ops);
+CREATE INDEX tag_name_idx ON app_public.tags USING gin (tag_name public.gin_trgm_ops);
 
 
 --

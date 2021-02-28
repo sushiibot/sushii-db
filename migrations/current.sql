@@ -1,5 +1,7 @@
 -- postgraphile auth stuff
 
+-- first enable rls for stuff
+
 /**********/
 drop table if exists app_private.sessions cascade;
 create table app_private.sessions (
@@ -35,7 +37,7 @@ comment on function app_public.current_user_id() is
 
 /**********/
 
-drop function if exists app_public.tg__timestamps() cascade;
+drop function if exists app_private.tg__timestamps() cascade;
 create function app_private.tg__timestamps() returns trigger as $$
 begin
   NEW.created_at = (case when TG_OP = 'INSERT' then NOW() else OLD.created_at end);
@@ -49,6 +51,8 @@ comment on function app_private.tg__timestamps() is
 /**********/
 
 -- users that logged into web ui
+-- this is app_public.users and app_public.user_authentications from the graphile/starter merged
+-- since we only care about a single oauth discord login we don't need an extra table for multiple auths
 drop table if exists app_public.web_users cascade;
 create table app_public.web_users (
     -- discord user ID
@@ -56,8 +60,11 @@ create table app_public.web_users (
     -- discord username/discrim
     username      text        not null,
     discriminator int         not null,
-    avatar_url    text        not null,
+    -- avatar hash
+    avatar        text,
     is_admin      boolean     not null default false,
+    -- oauth info
+    details jsonb not null default '{}'::jsonb,
     created_at    timestamptz not null default now(),
     updated_at    timestamptz not null default now()
 );
@@ -86,10 +93,12 @@ comment on column app_public.web_users.username is
   E'Discord username of the user.';
 comment on column app_public.web_users.discriminator is
   E'Discord disciminator of the user.';
-comment on column app_public.web_users.avatar_url is
-  E'Discord avatar URL.';
+comment on column app_public.web_users.avatar is
+  E'Discord avatar hash. Null if user does not have one.';
 comment on column app_public.web_users.is_admin is
   E'If true, the user has elevated privileges.';
+comment on column app_public.web_users.details is
+  E'Additional profile details extracted from Discord oauth';
 comment on column app_public.web_users.created_at is
   E'First registered on the application. Is not when a user created their Discord account.';
 
@@ -104,11 +113,14 @@ create trigger _100_timestamps
 drop table if exists app_public.web_guilds cascade;
 create table app_public.web_guilds (
     id         bigint primary key,
+    -- nullable since sushii might not be in web_guilds
+    config_id  bigint unique references app_public.web_guilds,
     name       text not null,
-    icon_url   text,
+    icon       text,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+create index on app_public.web_guilds(config_id);
 -- timestamps
 create trigger _100_timestamps
   before insert or update on app_public.web_guilds
@@ -120,6 +132,10 @@ create table app_public.web_user_guilds (
     user_id     bigint not null,
     guild_id    bigint not null,
     permissions bigint not null,
+    -- https://discord.com/developers/docs/topics/permissions#permissions
+    -- true if user has manage_guild
+    manage_guild boolean generated always
+      as ((permissions & x'00000020'::bigint) = x'00000020'::bigint) stored,
     -- user_id fkey
     constraint web_user_guilds_user_id_fkey
         foreign key(user_id)
@@ -135,21 +151,31 @@ create table app_public.web_user_guilds (
 );
 -- index on user_id since we only care about listing all a user's guilds
 create index on app_public.web_user_guilds (user_id);
+create index on app_public.web_user_guilds (guild_id);
 
--- get all guild ids a user is in
-drop function if exists app_public.current_user_guild_ids() cascade;
-create function app_public.current_user_guild_ids() returns setof bigint as $$
+-- get all guild ids a user is in where user has managed_guild permission
+-- ignores servers user doesn't have manage_guild in 
+drop function if exists app_public.current_user_managed_guild_ids() cascade;
+create function app_public.current_user_managed_guild_ids() returns setof bigint as $$
   select guild_id
     from app_public.web_user_guilds
-   where user_id = app_public.current_user_id();
+   where user_id = app_public.current_user_id()
+     and manage_guild;
 $$ language sql stable security definer set search_path = pg_catalog, public, pg_temp;
 
 -- guilds rls 
 alter table app_public.web_guilds enable row level security;
--- only allow selecting guilds user is in
-create policy select_self on app_public.web_guilds for select using (id in (select app_public.current_user_guild_ids()));
+-- only allow selecting guilds user is and has manage perms
+create policy select_self on app_public.web_guilds for
+  select using (id in (select app_public.current_user_managed_guild_ids()));
 
 grant select on app_public.web_guilds to :DATABASE_VISITOR;
+
+-- enable rls to guild configs so it shows up
+alter table app_public.guild_configs enable row level security;
+create policy select_managed_guild on app_public.guild_configs
+  for select using (id in (select app_public.current_user_managed_guild_ids()));
+grant select on app_public.guild_configs to :DATABASE_VISITOR;
 
 /**********/
 
@@ -162,9 +188,22 @@ $$ language sql stable;
 comment on function app_public.current_user() is
   E'The currently logged in user (or null if not logged in).';
 
-/***********************/
-/* main auth functions */
-/***********************/
+/*******************/
+/* main auth stuff */
+/*******************/
+
+-- This table contains secret information for each user_authentication; could
+-- be things like access tokens, refresh tokens, profile information. Whatever
+-- the passport strategy deems necessary.
+drop table if exists app_private.user_authentication_secrets cascade;
+create table app_private.user_authentication_secrets (
+  user_id bigint not null primary key
+    references app_public.web_users(id) on delete cascade,
+  details jsonb not null default '{}'::jsonb
+);
+alter table app_private.user_authentication_secrets enable row level security;
+
+/***********/
 
 drop function if exists app_public.logout() cascade;
 create function app_public.logout() returns void as $$
@@ -179,228 +218,151 @@ $$ language plpgsql security definer volatile set search_path to pg_catalog, pub
 
 /**********/
 
-drop function if exists app_public.really_create_user() cascade;
-create function app_private.really_create_user(
-  username citext,
-  email text,
-  email_is_verified bool,
-  name text,
-  avatar_url text,
-  password text default null
-) returns app_public.web_users as $$
-declare
-  v_user app_public.web_users;
-  v_username citext = username;
-begin
-  if password is not null then
-    perform app_private.assert_valid_password(password);
-  end if;
-  if email is null then
-    raise exception 'Email is required' using errcode = 'MODAT';
-  end if;
-
-  -- Insert the new user
-  insert into app_public.web_users (username, name, avatar_url) values
-    (v_username, name, avatar_url)
-    returning * into v_user;
-
-	-- Add the user's email
-  insert into app_public.user_emails (user_id, email, is_verified, is_primary)
-  values (v_user.id, email, email_is_verified, email_is_verified);
-
-  -- Store the password
-  if password is not null then
-    update app_private.user_secrets
-    set password_hash = crypt(password, gen_salt('bf'))
-    where user_id = v_user.id;
-  end if;
-
-  -- Refresh the user
-  select * into v_user from app_public.web_users where id = v_user.id;
-
-  return v_user;
-end;
-$$ language plpgsql volatile set search_path to pg_catalog, public, pg_temp;
-
-comment on function app_private.really_create_user(username citext, email text, email_is_verified bool, name text, avatar_url text, password text) is
-  E'Creates a user account. All arguments are optional, it trusts the calling method to perform sanitisation.';
-
-/**********/
-
 drop function if exists app_public.register_user() cascade;
 create function app_private.register_user(
-  f_service character varying,
-  f_identifier character varying,
-  f_profile json,
-  f_auth_details json,
-  f_email_is_verified boolean default false
-) returns app_public.web_users as $$
-declare
-  v_user app_public.web_users;
-  v_email citext;
-  v_name text;
-  v_username citext;
-  v_avatar_url text;
-  v_user_authentication_id uuid;
-begin
-  -- Extract data from the user’s OAuth profile data.
-  v_email := f_profile ->> 'email';
-  v_name := f_profile ->> 'name';
-  v_username := f_profile ->> 'username';
-  v_avatar_url := f_profile ->> 'avatar_url';
-
-  -- Sanitise the username, and make it unique if necessary.
-  if v_username is null then
-    v_username = coalesce(v_name, 'user');
-  end if;
-  v_username = regexp_replace(v_username, '^[^a-z]+', '', 'gi');
-  v_username = regexp_replace(v_username, '[^a-z0-9]+', '_', 'gi');
-  if v_username is null or length(v_username) < 3 then
-    v_username = 'user';
-  end if;
-  select (
-    case
-    when i = 0 then v_username
-    else v_username || i::text
-    end
-  ) into v_username from generate_series(0, 1000) i
-  where not exists(
-    select 1
-    from app_public.web_users
-    where users.username = (
-      case
-      when i = 0 then v_username
-      else v_username || i::text
-      end
-    )
-  )
-  limit 1;
-
-  -- Create the user account
-  v_user = app_private.really_create_user(
-    username => v_username,
-    email => v_email,
-    email_is_verified => f_email_is_verified,
-    name => v_name,
-    avatar_url => v_avatar_url
-  );
-
-  -- Insert the user’s private account data (e.g. OAuth tokens)
-  insert into app_public.user_authentications (user_id, service, identifier, details) values
-    (v_user.id, f_service, f_identifier, f_profile) returning id into v_user_authentication_id;
-  insert into app_private.user_authentication_secrets (user_authentication_id, details) values
-    (v_user_authentication_id, f_auth_details);
-
-  return v_user;
-end;
-$$ language plpgsql volatile security definer set search_path to pg_catalog, public, pg_temp;
-
-comment on function app_private.register_user(f_service character varying, f_identifier character varying, f_profile json, f_auth_details json, f_email_is_verified boolean) is
-  E'Used to register a user from information gleaned from OAuth. Primarily used by link_or_register_user';
-
-/**********/
-
-
-drop function if exists app_private.link_or_register_user();
-create function app_private.link_or_register_user(
-  -- discord id as text
-  f_user_id text,
-  f_service character varying,
-  f_identifier character varying,
+  f_discord_user_id character varying,
   f_profile json,
   f_auth_details json
 ) returns app_public.web_users as $$
 declare
-  v_matched_user_id uuid;
-  v_matched_authentication_id uuid;
-  v_email citext;
-  v_name text;
-  v_avatar_url text;
   v_user app_public.web_users;
-  v_user_email app_public.user_emails;
+  v_username text;
+  v_discriminator int;
+  v_avatar text;
+  v_user_guilds json;
 begin
-  -- See if a user account already matches these details
-  select id, user_id
-    into v_matched_authentication_id, v_matched_user_id
-    from app_public.user_authentications
-    where service = f_service
-    and identifier = f_identifier
-    limit 1;
+  -- Extract data from the user’s OAuth profile data.
+  v_username := f_profile ->> 'username';
+  v_discriminator := (f_profile ->> 'discriminator')::int;
+  v_avatar := f_profile ->> 'avatar';
+  v_user_guilds := f_profile -> 'guilds';
 
-  if v_matched_user_id is not null and f_user_id is not null and v_matched_user_id <> f_user_id then
-    raise exception 'A different user already has this account linked.' using errcode = 'TAKEN';
-  end if;
+  -- Insert the new user
+  insert into app_public.web_users (id, username, discriminator, avatar, details)
+       values (f_discord_user_id::bigint, v_username, v_discriminator, v_avatar, f_profile)
+    returning *
+         into v_user;
 
-  v_email = f_profile ->> 'email';
-  v_name := f_profile ->> 'name';
-  v_avatar_url := f_profile ->> 'avatar_url';
+  -- Insert guilds
+  insert into app_public.web_guilds (id, config_id, name, icon)
+       select (value->>'id')::bigint as guild_id,
+              (select id from app_public.guild_configs where id = (value->>'id')::bigint),
+              value->>'name',
+              value->>'icon'
+         from json_array_elements(v_user_guilds)
+           on conflict (id)
+              do update
+              set name = excluded.name,
+                  icon = excluded.icon;
 
-  if v_matched_authentication_id is null then
-    if f_user_id is not null then
-      -- Link new account to logged in user account
-      insert into app_public.user_authentications (user_id, service, identifier, details) values
-        (f_user_id, f_service, f_identifier, f_profile) returning id, user_id into v_matched_authentication_id, v_matched_user_id;
-      insert into app_private.user_authentication_secrets (user_authentication_id, details) values
-        (v_matched_authentication_id, f_auth_details);
-      perform graphile_worker.add_job(
-        'user__audit',
-        json_build_object(
-          'type', 'linked_account',
-          'user_id', f_user_id,
-          'extra1', f_service,
-          'extra2', f_identifier,
-          'current_user_id', app_public.current_user_id()
-        ));
-    elsif v_email is not null then
-      -- See if the email is registered
-      select * into v_user_email from app_public.user_emails where email = v_email and is_verified is true;
-      if v_user_email is not null then
-        -- User exists!
-        insert into app_public.user_authentications (user_id, service, identifier, details) values
-          (v_user_email.user_id, f_service, f_identifier, f_profile) returning id, user_id into v_matched_authentication_id, v_matched_user_id;
-        insert into app_private.user_authentication_secrets (user_authentication_id, details) values
-          (v_matched_authentication_id, f_auth_details);
-        perform graphile_worker.add_job(
-          'user__audit',
-          json_build_object(
-            'type', 'linked_account',
-            'user_id', f_user_id,
-            'extra1', f_service,
-            'extra2', f_identifier,
-            'current_user_id', app_public.current_user_id()
-          ));
-      end if;
-    end if;
-  end if;
-  if v_matched_user_id is null and f_user_id is null and v_matched_authentication_id is null then
-    -- Create and return a new user account
-    return app_private.register_user(f_service, f_identifier, f_profile, f_auth_details, true);
+  -- Insert web guilds
+  insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+       select f_discord_user_id::bigint as user_id,
+              (value->>'id')::bigint,
+              (value->>'permissions')::bigint
+         from json_array_elements(v_user_guilds);
+
+  -- Insert the user’s private account data (e.g. OAuth tokens)
+  insert into app_private.user_authentication_secrets (user_id, details)
+       values (f_discord_user_id::bigint, f_auth_details);
+
+  return v_user;
+end;
+$$ language plpgsql volatile security definer set search_path to pg_catalog, public, pg_temp;
+
+comment on function app_private.register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) is
+  E'Used to register a user from information gleaned from OAuth. Primarily used by login_or_register_user';
+
+/**********/
+
+-- should not be called if logged in already. graphile/starter uses this to link
+-- additional oauth accounts if user is already logged in but since we only care
+-- about Discord, if user is already logged in then there is no reason for them
+-- to link another account, there is no other accounts to link
+drop function if exists app_private.login_or_register_user();
+create function app_private.login_or_register_user(
+  -- discord id as string, in case any u64 overflows in JS
+  f_discord_user_id character varying,
+  f_profile json,
+  f_auth_details json
+) returns app_public.web_users as $$
+declare
+  v_matched_user_id bigint;
+  v_username text;
+  v_discriminator int;
+  v_avatar text;
+  v_user_guilds json;
+  v_user app_public.web_users;
+begin
+  -- check if there is already a user
+  select id
+    into v_matched_user_id
+    from app_public.web_users
+   where id = f_discord_user_id::bigint
+   limit 1;
+
+  v_username := f_profile ->> 'username';
+  v_discriminator := (f_profile ->> 'discriminator')::int;
+  v_avatar := f_profile ->> 'avatar';
+  v_user_guilds := f_profile -> 'guilds';
+
+  -- v_matched_user_id is if user already registered, f_user_id is null if not logged in
+  if v_matched_user_id is null then
+    -- create and return new user account
+    -- do not need to handle linking new external oauth accounts to existing
+    -- accounts since we only care about Discord oauth, if user already has
+    -- existing account then there isn't anything to link
+    return app_private.register_user(f_discord_user_id, f_profile, f_auth_details);
   else
-    if v_matched_authentication_id is not null then
-      update app_public.user_authentications
-        set details = f_profile
-        where id = v_matched_authentication_id;
-      update app_private.user_authentication_secrets
-        set details = f_auth_details
-        where user_authentication_id = v_matched_authentication_id;
-      update app_public.web_users
-        set
-          name = coalesce(users.name, v_name),
-          avatar_url = coalesce(users.avatar_url, v_avatar_url)
-        where id = v_matched_user_id
-        returning  * into v_user;
-      return v_user;
-    else
-      -- v_matched_authentication_id is null
-      -- -> v_matched_user_id is null (they're paired)
-      -- -> f_user_id is not null (because the if clause above)
-      -- -> v_matched_authentication_id is not null (because of the separate if block above creating a user_authentications)
-      -- -> contradiction.
-      raise exception 'This should not occur';
-    end if;
+    -- user exists, update oauth info to keep details in sync
+    update app_public.web_users
+           -- coalese new value is first since it returns first non-null value
+       set username = coalesce(v_username, app_public.web_users.username),
+           discriminator = coalesce(v_discriminator, app_public.web_users.discriminator),
+           avatar = coalesce(v_avatar, app_public.web_users.avatar),
+           details = f_profile
+     where id = v_matched_user_id
+           returning * into v_user;
+
+    update app_private.user_authentication_secrets
+       set details = f_auth_details
+     where user_id = v_matched_user_id;
+
+    -- Update guild data
+    insert into app_public.web_guilds (id, config_id, name, icon)
+         select (value->>'id')::bigint,
+                (select id from app_public.guild_configs where id = (value->>'id')::bigint),
+                value->>'name',
+                value->>'icon'
+           from json_array_elements(v_user_guilds)
+             on conflict (id)
+                do update
+                set name = excluded.name,
+                    icon = excluded.icon;
+
+    -- Delete user guilds that they left
+    -- ensure guild_id not in is not nulls
+    delete from app_public.web_user_guilds
+          where user_id = v_matched_user_id
+            and guild_id not in (
+                select (value->>'id')::bigint
+                  from json_array_elements(v_user_guilds)
+                 where guild_id is not null);
+
+    -- Update user guilds
+    insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+         select f_discord_user_id::bigint as user_id,
+                (value->>'id')::bigint,
+                (value->>'permissions')::bigint
+           from json_array_elements(v_user_guilds)
+                on conflict (user_id, guild_id)
+                   do update
+                   set permissions = excluded.permissions;
+
+    return v_user;
   end if;
 end;
 $$ language plpgsql volatile security definer set search_path to pg_catalog, public, pg_temp;
 
-comment on function app_private.link_or_register_user(f_user_id uuid, f_service character varying, f_identifier character varying, f_profile json, f_auth_details json) is
-  E'If you''re logged in, this will link an additional OAuth login to your account if necessary. If you''re logged out it may find if an account already exists (based on OAuth details or email address) and return that, or create a new user account if necessary.';
+comment on function app_private.login_or_register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) is
+  E'This will log you in if an account already exists (based on OAuth Discord user_id) and return that, or create a new user account.';

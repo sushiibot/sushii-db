@@ -114,7 +114,7 @@ drop table if exists app_public.web_guilds cascade;
 create table app_public.web_guilds (
     id         bigint primary key,
     -- nullable since sushii might not be in web_guilds
-    config_id  bigint unique references app_public.web_guilds,
+    config_id  bigint unique references app_public.guild_configs,
     name       text not null,
     icon       text,
     created_at timestamptz not null default now(),

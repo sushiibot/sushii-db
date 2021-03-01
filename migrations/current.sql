@@ -21,9 +21,129 @@ create function app_hidden.xp_from_level(level bigint) returns bigint as $$
   select floor((pow(level, 2) + level) / 2 * 100 - (level * 100))::bigint;
 $$ language sql stable;
 
--- how much xp a user has progressed in a single level
--- ie if they are level 2 and they have 150 xp, level 1 required 100xp
--- this will return 50xp
+drop type if exists app_hidden.level_timeframe cascade;
+create type app_hidden.level_timeframe as enum ('all_time', 'day', 'week', 'month');
+
+-- function to get a list of user xps,
+-- NOT used directly, it's just to get a list of users with their levels aggregated
+drop function if exists app_hidden.user_levels_filtered(
+  f_timeframe app_hidden.level_timeframe,
+  f_guild_id bigint
+) cascade;
+
+create function app_hidden.user_levels_filtered(
+  f_timeframe app_hidden.level_timeframe,
+  f_guild_id bigint
+) returns table (
+  user_id bigint,
+  xp bigint
+) as $$
+begin
+  -- Bruh I don't know what this is either, but it works I think?
+  -- aggregates are only if global (f_guild_id not provided)
+  if f_guild_id is null then
+    return query
+           select app_public.user_levels.user_id,
+                  case
+                       when f_timeframe = 'all_time' then sum(msg_all_time)::bigint
+                       when f_timeframe = 'day'      then sum(msg_day)::bigint
+                       when f_timeframe = 'week'     then sum(msg_week)::bigint
+                       when f_timeframe = 'month'    then sum(msg_month)::bigint
+                  end xp
+             from app_public.user_levels
+            where case
+                       -- no filter when all
+                       when f_timeframe = 'all_time' then true
+                       when f_timeframe = 'day'
+                            then extract(DOY  from last_msg) = extract(DOY  from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'week'
+                            then extract(WEEK from last_msg) = extract(WEEK from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'month'
+                            then extract(MONTH from last_msg) = extract(MONTH from now())
+                             and extract(YEAR  from last_msg) = extract(YEAR  from now())
+                  end
+         group by app_public.user_levels.user_id;
+  else
+    -- guild query, no aggregates
+    return query
+           select app_public.user_levels.user_id,
+                  case
+                       when f_timeframe = 'all_time' then msg_all_time
+                       when f_timeframe = 'day'      then msg_day
+                       when f_timeframe = 'week'     then msg_week
+                       when f_timeframe = 'month'    then msg_month
+                  end xp
+             from app_public.user_levels
+            where guild_id = f_guild_id
+              and case
+                       -- no filter when all
+                       when f_timeframe = 'all_time' then true
+                       when f_timeframe = 'day'
+                            then extract(DOY  from last_msg) = extract(DOY  from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'week'
+                            then extract(WEEK from last_msg) = extract(WEEK from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'month'
+                            then extract(MONTH from last_msg) = extract(MONTH from now())
+                             and extract(YEAR  from last_msg) = extract(YEAR  from now())
+                  end;
+  end if;
+end;
+$$ language plpgsql volatile security definer set search_path to pg_catalog, public, pg_temp;
+
+-- function to get either global/guild leaderboard with specified timeframe
+-- this is to actually get the leaderboard with their cached user data added
+drop function if exists app_hidden.timeframe_user_levels(
+  f_timeframe app_hidden.level_timeframe,
+  f_guild_id bigint
+) cascade;
+
+create function app_hidden.timeframe_user_levels(
+  f_timeframe app_hidden.level_timeframe,
+  f_guild_id bigint
+) returns table (
+  user_id bigint,
+  avatar_url text,
+  username text,
+  discriminator int,
+  xp bigint,
+  current_level bigint,
+  next_level_xp_required bigint,
+  next_level_xp_progress bigint
+) as $$
+  select t.user_id,
+         avatar_url,
+         name as username,
+         discriminator,
+         t.xp,
+         current_level,
+         next_level_xp_required,
+         next_level_xp_progress
+    from app_hidden.user_levels_filtered(f_timeframe, f_guild_id) t
+         -- join the cached users to get username/avatar/discrim
+         left join app_public.cached_users
+                on user_id = id,
+         -- lateral joins to reuse calculations
+         lateral (select app_hidden.level_from_xp(xp::bigint)
+                         as current_level
+                 ) c,
+         lateral (select (app_hidden.xp_from_level(current_level + 1) - xp)
+                         as next_level_xp_required
+                 ) r,
+         -- how much xp a user has progressed in a single level
+         -- ie if they are level 2 and they have 150 xp, level 1 required 100xp
+         -- this will return 50xp
+         lateral (select (xp - app_hidden.xp_from_level(current_level))
+                         as next_level_xp_progress
+                 ) p
+      order by xp desc,
+               user_id desc;
+$$ language sql stable;
+
+-- cached leaderboard
 drop materialized view if exists app_public.user_levels_global cascade;
 create materialized view app_public.user_levels_global
     as select t.user_id,
@@ -37,20 +157,23 @@ create materialized view app_public.user_levels_global
          from (select user_id,
                       sum(msg_all_time) as xp
                  from app_public.user_levels
-             group by user_id) t
-             -- join the cached users to get username/avatar/discrim
-             left join app_public.cached_users
-                    on user_id = id,
-             -- lateral joins to reuse calculations
-             lateral (select app_hidden.level_from_xp(xp::bigint)
-                             as current_level
-                     ) c,
-             lateral (select (app_hidden.xp_from_level(current_level + 1) - xp)
-                             as next_level_xp_required
-                     ) r,
-             lateral (select (xp - app_hidden.xp_from_level(current_level))
-                             as next_level_xp_progress
-                     ) p
+              group by user_id) t
+              -- join the cached users to get username/avatar/discrim
+              left join app_public.cached_users
+                     on user_id = id,
+              -- lateral joins to reuse calculations
+              lateral (select app_hidden.level_from_xp(xp::bigint)
+                              as current_level
+                      ) c,
+              lateral (select (app_hidden.xp_from_level(current_level + 1) - xp)
+                              as next_level_xp_required
+                      ) r,
+              -- how much xp a user has progressed in a single level
+              -- ie if they are level 2 and they have 150 xp, level 1 required 100xp
+              -- this will return 50xp
+              lateral (select (xp - app_hidden.xp_from_level(current_level))
+                              as next_level_xp_progress
+                      ) p
      order by xp desc,
               user_id desc
               with data;
@@ -61,22 +184,6 @@ create unique index on app_public.user_levels_global(user_id);
 comment on materialized view app_public.user_levels_global is
   E'Global leaderboard for user levels. All XP in each guild is aggregated for each user.';
 grant select on app_public.user_levels_global to :DATABASE_VISITOR;
-
-drop function if exists app_public.user_levels_global_cached_user(
-  user_level app_public.user_levels_global
-) cascade;
-
-create function app_public.user_levels_global_cached_user(
-  user_level app_public.user_levels_global
-) returns app_public.cached_users as $$
-  select *
-    from app_public.cached_users
-   where id = user_level.user_id;
-$$ language sql stable;
-
-grant execute on function app_public.user_levels_global_cached_user(
-  user_level app_public.user_levels_global
-) to :DATABASE_VISITOR;
 
 /**********/
 

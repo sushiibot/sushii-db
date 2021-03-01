@@ -5,6 +5,35 @@
 -- we don't directly use user_levels table, use view below to calculate levels stuff
 -- alter table app_public.user_levels enable row level security;
 
+-- anyone can view all guilds
+alter table app_public.cached_guilds enable row level security;
+-- allow user_levels to be selected, hide direct access since this is only used
+-- for leaderboards
+alter table app_public.user_levels enable row level security;
+-- allow cached_users to be selected, hide direct access since this is only used
+-- for leaderboards
+alter table app_public.cached_users enable row level security;
+
+drop policy if exists select_all on app_public.cached_guilds;
+drop policy if exists select_all on app_public.user_levels;
+drop policy if exists select_all on app_public.cached_users;
+
+create policy select_all on app_public.cached_guilds for select using (true);
+create policy select_all on app_public.user_levels   for select using (true);
+create policy select_all on app_public.cached_users  for select using (true);
+
+-- without grants, gets an rls error
+-- "And in fact is likely a GRANT issue; e.g. you've used column-level select
+-- grants. The error code is actually insufficient_privilege (42501)" 
+grant select on app_public.cached_guilds to :DATABASE_VISITOR;
+grant select on app_public.user_levels   to :DATABASE_VISITOR;
+grant select on app_public.cached_users  to :DATABASE_VISITOR;
+
+-- disable getting all guilds at once, only allow getting by id
+comment on table app_public.cached_guilds is E'@omit all,filter';
+comment on table app_public.user_levels   is E'@omit all,filter';
+comment on table app_public.cached_users  is E'@omit all,filter';
+
 -- add views and stuff for calculating user XP for leaderboards
 
 -- gets the user's current level from **total** xp
@@ -13,16 +42,16 @@
 drop function if exists app_hidden.level_from_xp(xp bigint) cascade;
 create function app_hidden.level_from_xp(xp bigint) returns bigint as $$
   select floor((sqrt(100 * (2 * xp + 25)) + 50) / 100)::bigint;
-$$ language sql stable;
+$$ language sql immutable;
 
 -- experience =(level^2+level)/2*100-(level*100)
 drop function if exists app_hidden.xp_from_level(level bigint) cascade;
 create function app_hidden.xp_from_level(level bigint) returns bigint as $$
   select floor((pow(level, 2) + level) / 2 * 100 - (level * 100))::bigint;
-$$ language sql stable;
+$$ language sql immutable;
 
 drop type if exists app_hidden.level_timeframe cascade;
-create type app_hidden.level_timeframe as enum ('all_time', 'day', 'week', 'month');
+create type app_hidden.level_timeframe as enum ('ALL_TIME', 'DAY', 'WEEK', 'MONTH');
 
 -- function to get a list of user xps,
 -- NOT used directly, it's just to get a list of users with their levels aggregated
@@ -45,22 +74,22 @@ begin
     return query
            select app_public.user_levels.user_id,
                   case
-                       when f_timeframe = 'all_time' then sum(msg_all_time)::bigint
-                       when f_timeframe = 'day'      then sum(msg_day)::bigint
-                       when f_timeframe = 'week'     then sum(msg_week)::bigint
-                       when f_timeframe = 'month'    then sum(msg_month)::bigint
+                       when f_timeframe = 'ALL_TIME' then sum(msg_all_time)::bigint
+                       when f_timeframe = 'DAY'      then sum(msg_day)::bigint
+                       when f_timeframe = 'WEEK'     then sum(msg_week)::bigint
+                       when f_timeframe = 'MONTH'    then sum(msg_month)::bigint
                   end xp
              from app_public.user_levels
             where case
                        -- no filter when all
-                       when f_timeframe = 'all_time' then true
-                       when f_timeframe = 'day'
+                       when f_timeframe = 'ALL_TIME' then true
+                       when f_timeframe = 'DAY'
                             then extract(DOY  from last_msg) = extract(DOY  from now())
                              and extract(YEAR from last_msg) = extract(YEAR from now())
-                       when f_timeframe = 'week'
+                       when f_timeframe = 'WEEK'
                             then extract(WEEK from last_msg) = extract(WEEK from now())
                              and extract(YEAR from last_msg) = extract(YEAR from now())
-                       when f_timeframe = 'month'
+                       when f_timeframe = 'MONTH'
                             then extract(MONTH from last_msg) = extract(MONTH from now())
                              and extract(YEAR  from last_msg) = extract(YEAR  from now())
                   end
@@ -70,40 +99,40 @@ begin
     return query
            select app_public.user_levels.user_id,
                   case
-                       when f_timeframe = 'all_time' then msg_all_time
-                       when f_timeframe = 'day'      then msg_day
-                       when f_timeframe = 'week'     then msg_week
-                       when f_timeframe = 'month'    then msg_month
+                       when f_timeframe = 'ALL_TIME' then msg_all_time
+                       when f_timeframe = 'DAY'      then msg_day
+                       when f_timeframe = 'WEEK'     then msg_week
+                       when f_timeframe = 'MONTH'    then msg_month
                   end xp
              from app_public.user_levels
             where guild_id = f_guild_id
               and case
                        -- no filter when all
-                       when f_timeframe = 'all_time' then true
-                       when f_timeframe = 'day'
+                       when f_timeframe = 'ALL_TIME' then true
+                       when f_timeframe = 'DAY'
                             then extract(DOY  from last_msg) = extract(DOY  from now())
                              and extract(YEAR from last_msg) = extract(YEAR from now())
-                       when f_timeframe = 'week'
+                       when f_timeframe = 'WEEK'
                             then extract(WEEK from last_msg) = extract(WEEK from now())
                              and extract(YEAR from last_msg) = extract(YEAR from now())
-                       when f_timeframe = 'month'
+                       when f_timeframe = 'MONTH'
                             then extract(MONTH from last_msg) = extract(MONTH from now())
                              and extract(YEAR  from last_msg) = extract(YEAR  from now())
                   end;
   end if;
 end;
-$$ language plpgsql volatile security definer set search_path to pg_catalog, public, pg_temp;
+$$ language plpgsql stable security definer set search_path to pg_catalog, public, app_public, pg_temp;
 
 -- function to get either global/guild leaderboard with specified timeframe
 -- this is to actually get the leaderboard with their cached user data added
-drop function if exists app_hidden.timeframe_user_levels(
-  f_timeframe app_hidden.level_timeframe,
-  f_guild_id bigint
+drop function if exists app_public.timeframe_user_levels(
+  timeframe app_hidden.level_timeframe,
+  guild_id bigint
 ) cascade;
 
-create function app_hidden.timeframe_user_levels(
-  f_timeframe app_hidden.level_timeframe,
-  f_guild_id bigint
+create function app_public.timeframe_user_levels(
+  timeframe app_hidden.level_timeframe,
+  guild_id bigint default null
 ) returns table (
   user_id bigint,
   avatar_url text,
@@ -122,11 +151,12 @@ create function app_hidden.timeframe_user_levels(
          current_level,
          next_level_xp_required,
          next_level_xp_progress
-    from app_hidden.user_levels_filtered(f_timeframe, f_guild_id) t
+    from app_hidden.user_levels_filtered(timeframe, guild_id) t
          -- join the cached users to get username/avatar/discrim
          left join app_public.cached_users
                 on user_id = id,
-         -- lateral joins to reuse calculations
+         -- lateral joins to reuse calculations, prob not needed considering
+         -- they're immutable functions which should be optimized
          lateral (select app_hidden.level_from_xp(xp::bigint)
                          as current_level
                  ) c,
@@ -143,7 +173,11 @@ create function app_hidden.timeframe_user_levels(
                user_id desc;
 $$ language sql stable;
 
+comment on function app_public.timeframe_user_levels is
+  E'Leaderboard for given timeframe and optional guild. If guild is null, it is the global leaderboard';
+
 -- cached leaderboard
+-- currently not used, kind of hard to provide params to it
 drop materialized view if exists app_public.user_levels_global cascade;
 create materialized view app_public.user_levels_global
     as select t.user_id,
@@ -308,6 +342,7 @@ create table app_public.web_guilds (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+
 create index on app_public.web_guilds(config_id);
 -- timestamps
 create trigger _100_timestamps

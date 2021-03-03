@@ -45,9 +45,18 @@ create function app_hidden.level_from_xp(xp bigint) returns bigint as $$
 $$ language sql immutable;
 
 -- experience =(level^2+level)/2*100-(level*100)
+-- required xp to progress a given level
 drop function if exists app_hidden.xp_from_level(level bigint) cascade;
 create function app_hidden.xp_from_level(level bigint) returns bigint as $$
   select floor((pow(level, 2) + level) / 2 * 100 - (level * 100))::bigint;
+$$ language sql immutable;
+
+-- triangular number * 100
+-- https://en.wikipedia.org/wiki/Triangular_number
+-- level - 1 since we start at level 1 but triangular starts at 0
+drop function if exists app_hidden.total_xp_from_level(level bigint) cascade;
+create function app_hidden.total_xp_from_level(level bigint) returns bigint as $$
+  select floor(((level - 1) * ((level - 1) + 1) / 2) * 100)::bigint;
 $$ language sql immutable;
 
 drop type if exists app_hidden.level_timeframe cascade;
@@ -65,20 +74,26 @@ create function app_hidden.user_levels_filtered(
   f_guild_id bigint
 ) returns table (
   user_id bigint,
-  xp bigint
+  xp bigint,
+  xp_diff bigint
 ) as $$
 begin
   -- Bruh I don't know what this is either, but it works I think?
   -- aggregates are only if global (f_guild_id not provided)
   if f_guild_id is null then
     return query
+           -- xp_diff should be xp gained only in a given category
+           -- xp should always be total xp
            select app_public.user_levels.user_id,
+                  -- total xp
+                  sum(msg_all_time)::bigint as xp,
+                  -- xp in timeframe
                   case
-                       when f_timeframe = 'ALL_TIME' then sum(msg_all_time)::bigint
+                       when f_timeframe = 'ALL_TIME' then null
                        when f_timeframe = 'DAY'      then sum(msg_day)::bigint
                        when f_timeframe = 'WEEK'     then sum(msg_week)::bigint
                        when f_timeframe = 'MONTH'    then sum(msg_month)::bigint
-                  end xp
+                  end xp_diff
              from app_public.user_levels
             where case
                        -- no filter when all
@@ -98,12 +113,15 @@ begin
     -- guild query, no aggregates
     return query
            select app_public.user_levels.user_id,
+                  -- total xp
+                  msg_all_time as xp,
+                  -- xp only in timeframe
                   case
-                       when f_timeframe = 'ALL_TIME' then msg_all_time
+                       when f_timeframe = 'ALL_TIME' then null
                        when f_timeframe = 'DAY'      then msg_day
                        when f_timeframe = 'WEEK'     then msg_week
                        when f_timeframe = 'MONTH'    then msg_month
-                  end xp
+                  end xp_diff
              from app_public.user_levels
             where guild_id = f_guild_id
               and case
@@ -139,7 +157,9 @@ create function app_public.timeframe_user_levels(
   username text,
   discriminator int,
   xp bigint,
+  xp_diff bigint,
   current_level bigint,
+  gained_levels bigint,
   next_level_xp_required bigint,
   next_level_xp_progress bigint
 ) as $$
@@ -148,7 +168,9 @@ create function app_public.timeframe_user_levels(
          name as username,
          discriminator,
          t.xp,
+         t.xp_diff,
          current_level,
+         gained_levels,
          next_level_xp_required,
          next_level_xp_progress
     from app_hidden.user_levels_filtered(timeframe, guild_id) t
@@ -157,67 +179,32 @@ create function app_public.timeframe_user_levels(
                 on user_id = id,
          -- lateral joins to reuse calculations, prob not needed considering
          -- they're immutable functions which should be optimized
-         lateral (select app_hidden.level_from_xp(xp::bigint)
+         lateral (select app_hidden.level_from_xp(xp)
                          as current_level
                  ) c,
-         lateral (select (app_hidden.xp_from_level(current_level + 1) - xp)
+         -- required xp to level up ie
+         -- level 2 -> 3 = 200xp
+         -- level 3 -> 4 = 300xp, etc
+         lateral (select current_level * 100
                          as next_level_xp_required
                  ) r,
          -- how much xp a user has progressed in a single level
          -- ie if they are level 2 and they have 150 xp, level 1 required 100xp
          -- this will return 50xp
-         lateral (select (xp - app_hidden.xp_from_level(current_level))
+         lateral (select xp - app_hidden.total_xp_from_level(current_level)
                          as next_level_xp_progress
-                 ) p
-      order by xp desc,
+                 ) p,
+         lateral (select (current_level - app_hidden.level_from_xp(xp - t.xp_diff))
+                         as gained_levels
+                 ) g
+      order by xp_diff desc,
+               -- if xp_diff is null, then it will sort by xp (i think)
+               xp desc,
                user_id desc;
 $$ language sql stable;
 
 comment on function app_public.timeframe_user_levels is
   E'Leaderboard for given timeframe and optional guild. If guild is null, it is the global leaderboard';
-
--- cached leaderboard
--- currently not used, kind of hard to provide params to it
-drop materialized view if exists app_public.user_levels_global cascade;
-create materialized view app_public.user_levels_global
-    as select t.user_id,
-              avatar_url,
-              name,
-              discriminator,
-              t.xp,
-              current_level,
-              next_level_xp_required,
-              next_level_xp_progress
-         from (select user_id,
-                      sum(msg_all_time) as xp
-                 from app_public.user_levels
-              group by user_id) t
-              -- join the cached users to get username/avatar/discrim
-              left join app_public.cached_users
-                     on user_id = id,
-              -- lateral joins to reuse calculations
-              lateral (select app_hidden.level_from_xp(xp::bigint)
-                              as current_level
-                      ) c,
-              lateral (select (app_hidden.xp_from_level(current_level + 1) - xp)
-                              as next_level_xp_required
-                      ) r,
-              -- how much xp a user has progressed in a single level
-              -- ie if they are level 2 and they have 150 xp, level 1 required 100xp
-              -- this will return 50xp
-              lateral (select (xp - app_hidden.xp_from_level(current_level))
-                              as next_level_xp_progress
-                      ) p
-     order by xp desc,
-              user_id desc
-              with data;
-
--- required to refresh materialized view concurrently
-create unique index on app_public.user_levels_global(user_id);
-
-comment on materialized view app_public.user_levels_global is
-  E'Global leaderboard for user levels. All XP in each guild is aggregated for each user.';
-grant select on app_public.user_levels_global to :DATABASE_VISITOR;
 
 /**********/
 
@@ -382,7 +369,8 @@ create index on app_public.web_user_guilds (guild_id);
 -- get all guild ids a user is in where user has managed_guild permission
 -- ignores servers user doesn't have manage_guild in.
 -- shouldn't be necessary since only guilds are added if user has permission
--- but this is just in case i guess
+-- this is just in case i guess, if we want to expand permissions further in the future
+-- to allow roles or something with access
 drop function if exists app_public.current_user_managed_guild_ids() cascade;
 create function app_public.current_user_managed_guild_ids() returns setof bigint as $$
   select guild_id

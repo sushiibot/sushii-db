@@ -10,7 +10,9 @@ sushii database migrations and database setup.
     docker exec -it container_id /bin/bash
 
     createuser --pwprompt sushii
+    # low permission role for querying as a user
     createuser --pwprompt sushii_visitor
+    # connects to db, can switch to visitor role
     createuser --pwprompt sushii_authenticator
 
     createdb sushii --owner=sushii

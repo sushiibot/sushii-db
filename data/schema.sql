@@ -79,9 +79,638 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 COMMENT ON EXTENSION "uuid-ossp" IS 'generate universally unique identifiers (UUIDs)';
 
 
+--
+-- Name: level_timeframe; Type: TYPE; Schema: app_hidden; Owner: -
+--
+
+CREATE TYPE app_hidden.level_timeframe AS ENUM (
+    'ALL_TIME',
+    'DAY',
+    'WEEK',
+    'MONTH'
+);
+
+
+--
+-- Name: current_level_progressed_xp(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.current_level_progressed_xp(xp bigint) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+  -- xp required for next level = (next level + 1) total xp required
+  select app_hidden.xp_from_level(app_hidden.level_from_xp(xp) + 1) - xp;
+$$;
+
+
+--
+-- Name: has_manage_guild(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.has_manage_guild(permissions bigint) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    select (permissions & x'00000020'::bigint) = x'00000020'::bigint;
+$$;
+
+
+--
+-- Name: level_from_xp(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.level_from_xp(xp bigint) RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select floor((sqrt(100 * (2 * xp + 25)) + 50) / 100)::bigint;
+$$;
+
+
+--
+-- Name: level_progress(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint) RETURNS record
+    LANGUAGE sql STABLE
+    AS $$
+  -- xp required for next level = (next level + 1) total xp required
+  select t.current_level,
+         (app_hidden.xp_from_level(current_level + 1) - xp) as next_level_xp_required,
+         (xp - app_hidden.xp_from_level(current_level)) as next_level_xp_progress
+    from (select app_hidden.level_from_xp(xp) as current_level) t;
+$$;
+
+
+--
+-- Name: total_xp_from_level(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.total_xp_from_level(level bigint) RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select floor(((level - 1) * ((level - 1) + 1) / 2) * 100)::bigint;
+$$;
+
+
+--
+-- Name: user_levels_filtered(app_hidden.level_timeframe, bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.user_levels_filtered(f_timeframe app_hidden.level_timeframe, f_guild_id bigint) RETURNS TABLE(user_id bigint, xp bigint, xp_diff bigint)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'app_public', 'pg_temp'
+    AS $$
+begin
+  -- Bruh I don't know what this is either, but it works I think?
+  -- aggregates are only if global (f_guild_id not provided)
+  if f_guild_id is null then
+    return query
+           -- xp_diff should be xp gained only in a given category
+           -- xp should always be total xp
+           select app_public.user_levels.user_id,
+                  -- total xp
+                  sum(msg_all_time)::bigint as xp,
+                  -- xp in timeframe
+                  case
+                       when f_timeframe = 'ALL_TIME' then null
+                       when f_timeframe = 'DAY'      then sum(msg_day)::bigint
+                       when f_timeframe = 'WEEK'     then sum(msg_week)::bigint
+                       when f_timeframe = 'MONTH'    then sum(msg_month)::bigint
+                  end xp_diff
+             from app_public.user_levels
+            where case
+                       -- no filter when all
+                       when f_timeframe = 'ALL_TIME' then true
+                       when f_timeframe = 'DAY'
+                            then extract(DOY  from last_msg) = extract(DOY  from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'WEEK'
+                            then extract(WEEK from last_msg) = extract(WEEK from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'MONTH'
+                            then extract(MONTH from last_msg) = extract(MONTH from now())
+                             and extract(YEAR  from last_msg) = extract(YEAR  from now())
+                  end
+         group by app_public.user_levels.user_id;
+  else
+    -- guild query, no aggregates
+    return query
+           select app_public.user_levels.user_id,
+                  -- total xp
+                  msg_all_time as xp,
+                  -- xp only in timeframe
+                  case
+                       when f_timeframe = 'ALL_TIME' then null
+                       when f_timeframe = 'DAY'      then msg_day
+                       when f_timeframe = 'WEEK'     then msg_week
+                       when f_timeframe = 'MONTH'    then msg_month
+                  end xp_diff
+             from app_public.user_levels
+            where guild_id = f_guild_id
+              and case
+                       -- no filter when all
+                       when f_timeframe = 'ALL_TIME' then true
+                       when f_timeframe = 'DAY'
+                            then extract(DOY  from last_msg) = extract(DOY  from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'WEEK'
+                            then extract(WEEK from last_msg) = extract(WEEK from now())
+                             and extract(YEAR from last_msg) = extract(YEAR from now())
+                       when f_timeframe = 'MONTH'
+                            then extract(MONTH from last_msg) = extract(MONTH from now())
+                             and extract(YEAR  from last_msg) = extract(YEAR  from now())
+                  end;
+  end if;
+end;
+$$;
+
+
+--
+-- Name: xp_from_level(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.xp_from_level(level bigint) RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select floor((pow(level, 2) + level) / 2 * 100 - (level * 100))::bigint;
+$$;
+
+
+--
+-- Name: xp_required_to_next_level(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.xp_required_to_next_level(xp bigint) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+  -- xp required for next level = (next level + 1) total xp required
+  select app_hidden.xp_from_level(app_hidden.level_from_xp(xp) + 1) - xp;
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
+
+--
+-- Name: web_users; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.web_users (
+    id bigint NOT NULL,
+    username text NOT NULL,
+    discriminator integer NOT NULL,
+    avatar text,
+    is_admin boolean DEFAULT false NOT NULL,
+    details jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE web_users; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON TABLE app_public.web_users IS 'A user who can log in to the application.';
+
+
+--
+-- Name: COLUMN web_users.id; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON COLUMN app_public.web_users.id IS 'Unique identifier for the user. This should match their Discord ID.';
+
+
+--
+-- Name: COLUMN web_users.username; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON COLUMN app_public.web_users.username IS 'Discord username of the user.';
+
+
+--
+-- Name: COLUMN web_users.discriminator; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON COLUMN app_public.web_users.discriminator IS 'Discord disciminator of the user.';
+
+
+--
+-- Name: COLUMN web_users.avatar; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON COLUMN app_public.web_users.avatar IS 'Discord avatar hash. Null if user does not have one.';
+
+
+--
+-- Name: COLUMN web_users.is_admin; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON COLUMN app_public.web_users.is_admin IS 'If true, the user has elevated privileges.';
+
+
+--
+-- Name: COLUMN web_users.details; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON COLUMN app_public.web_users.details IS 'Additional profile details extracted from Discord oauth';
+
+
+--
+-- Name: COLUMN web_users.created_at; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON COLUMN app_public.web_users.created_at IS 'First registered on the application. Is not when a user created their Discord account.';
+
+
+--
+-- Name: login_or_register_user(character varying, json, json); Type: FUNCTION; Schema: app_private; Owner: -
+--
+
+CREATE FUNCTION app_private.login_or_register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) RETURNS app_public.web_users
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+declare
+  v_matched_user_id bigint;
+  v_username text;
+  v_discriminator int;
+  v_avatar text;
+  v_user_guilds json;
+  v_user app_public.web_users;
+begin
+  -- check if there is already a user
+  select id
+    into v_matched_user_id
+    from app_public.web_users
+   where id = f_discord_user_id::bigint
+   limit 1;
+
+  v_username := f_profile ->> 'username';
+  v_discriminator := (f_profile ->> 'discriminator')::int;
+  v_avatar := f_profile ->> 'avatar';
+  v_user_guilds := f_profile -> 'guilds';
+
+  -- v_matched_user_id is if user already registered, f_user_id is null if not logged in
+  if v_matched_user_id is null then
+    -- create and return new user account
+    -- do not need to handle linking new external oauth accounts to existing
+    -- accounts since we only care about Discord oauth, if user already has
+    -- existing account then there isn't anything to link
+    return app_private.register_user(f_discord_user_id, f_profile, f_auth_details);
+  else
+    -- user exists, update oauth info to keep details in sync
+    update app_public.web_users
+           -- coalese new value is first since it returns first non-null value
+       set username = coalesce(v_username, app_public.web_users.username),
+           discriminator = coalesce(v_discriminator, app_public.web_users.discriminator),
+           avatar = coalesce(v_avatar, app_public.web_users.avatar),
+           details = f_profile
+     where id = v_matched_user_id
+           returning * into v_user;
+
+    update app_private.user_authentication_secrets
+       set details = f_auth_details
+     where user_id = v_matched_user_id;
+
+    -- Update guild data
+    insert into app_public.web_guilds (id, name, icon)
+         select (value->>'id')::bigint,
+                value->>'name',
+                value->>'icon'
+           from json_array_elements(v_user_guilds)
+          where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+             on conflict (id)
+                do update
+                set name = excluded.name,
+                    icon = excluded.icon;
+
+    -- Delete user guilds that they left
+    -- ensure guild_id not in is not nulls
+    delete from app_public.web_user_guilds
+          where user_id = v_matched_user_id
+            and guild_id not in (
+                select (value->>'id')::bigint
+                  from json_array_elements(v_user_guilds)
+                 where guild_id is not null);
+
+    -- Update user guilds
+    insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+         select f_discord_user_id::bigint as user_id,
+                (value->>'id')::bigint,
+                (value->>'permissions')::bigint
+           from json_array_elements(v_user_guilds)
+                -- only save guilds where user has manage guild permissions
+                where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+                on conflict (user_id, guild_id)
+                   do update
+                   set permissions = excluded.permissions;
+
+    return v_user;
+  end if;
+end;
+$$;
+
+
+--
+-- Name: FUNCTION login_or_register_user(f_discord_user_id character varying, f_profile json, f_auth_details json); Type: COMMENT; Schema: app_private; Owner: -
+--
+
+COMMENT ON FUNCTION app_private.login_or_register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) IS 'This will log you in if an account already exists (based on OAuth Discord user_id) and return that, or create a new user account.';
+
+
+--
+-- Name: register_user(character varying, json, json); Type: FUNCTION; Schema: app_private; Owner: -
+--
+
+CREATE FUNCTION app_private.register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) RETURNS app_public.web_users
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+declare
+  v_user app_public.web_users;
+  v_username text;
+  v_discriminator int;
+  v_avatar text;
+  v_user_guilds json;
+begin
+  -- Extract data from the user’s OAuth profile data.
+  v_username := f_profile ->> 'username';
+  v_discriminator := (f_profile ->> 'discriminator')::int;
+  v_avatar := f_profile ->> 'avatar';
+  v_user_guilds := f_profile -> 'guilds';
+
+  -- Insert the new user
+  insert into app_public.web_users (id, username, discriminator, avatar, details)
+       values (f_discord_user_id::bigint, v_username, v_discriminator, v_avatar, f_profile)
+    returning *
+         into v_user;
+
+  -- Insert guilds
+  insert into app_public.cached_guilds (id, name, icon)
+       select (value->>'id')::bigint as guild_id,
+              value->>'name',
+              value->>'icon'
+         from json_array_elements(v_user_guilds)
+              -- only save guilds where user has manage guild permissions
+        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+           on conflict (id)
+              do update
+              set name = excluded.name,
+                  icon = excluded.icon;
+
+  -- Insert web guilds, should not conflict since new user means they will have no entries
+  -- if this runs into error means it's re-registering a user I think
+  insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+       select f_discord_user_id::bigint as user_id,
+              (value->>'id')::bigint,
+              (value->>'permissions')::bigint
+         from json_array_elements(v_user_guilds)
+        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint;
+
+  -- Insert the user’s private account data (e.g. OAuth tokens)
+  insert into app_private.user_authentication_secrets (user_id, details)
+       values (f_discord_user_id::bigint, f_auth_details);
+
+  return v_user;
+end;
+$$;
+
+
+--
+-- Name: FUNCTION register_user(f_discord_user_id character varying, f_profile json, f_auth_details json); Type: COMMENT; Schema: app_private; Owner: -
+--
+
+COMMENT ON FUNCTION app_private.register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) IS 'Used to register a user from information gleaned from OAuth. Primarily used by login_or_register_user';
+
+
+--
+-- Name: tg__timestamps(); Type: FUNCTION; Schema: app_private; Owner: -
+--
+
+CREATE FUNCTION app_private.tg__timestamps() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+begin
+  NEW.created_at = (case when TG_OP = 'INSERT' then NOW() else OLD.created_at end);
+  NEW.updated_at = (case when TG_OP = 'UPDATE' and OLD.updated_at >= NOW() then OLD.updated_at + interval '1 millisecond' else NOW() end);
+  return NEW;
+end;
+$$;
+
+
+--
+-- Name: FUNCTION tg__timestamps(); Type: COMMENT; Schema: app_private; Owner: -
+--
+
+COMMENT ON FUNCTION app_private.tg__timestamps() IS 'This trigger should be called on all tables with created_at, updated_at - it ensures that they cannot be manipulated and that updated_at will always be larger than the previous updated_at.';
+
+
+--
+-- Name: current_session_id(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.current_session_id() RETURNS uuid
+    LANGUAGE sql STABLE
+    AS $$
+  select nullif(pg_catalog.current_setting('jwt.claims.session_id', true), '')::uuid;
+$$;
+
+
+--
+-- Name: FUNCTION current_session_id(); Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON FUNCTION app_public.current_session_id() IS 'Handy method to get the current session ID.';
+
+
+--
+-- Name: current_user(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public."current_user"() RETURNS app_public.web_users
+    LANGUAGE sql STABLE
+    AS $$
+  select web_users.*
+    from app_public.web_users
+   where id = app_public.current_user_id();
+$$;
+
+
+--
+-- Name: FUNCTION "current_user"(); Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON FUNCTION app_public."current_user"() IS 'The currently logged in user (or null if not logged in).';
+
+
+--
+-- Name: current_user_guild_ids(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.current_user_guild_ids() RETURNS SETOF bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+  select guild_id
+    from app_public.web_user_guilds
+   where user_id = app_public.current_user_id();
+$$;
+
+
+--
+-- Name: current_user_id(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.current_user_id() RETURNS bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+  select user_id
+    from app_private.sessions
+   where uuid = app_public.current_session_id();
+$$;
+
+
+--
+-- Name: FUNCTION current_user_id(); Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON FUNCTION app_public.current_user_id() IS 'Handy method to get the current user ID for use in RLS policies, etc; in GraphQL, use `currentUser{id}` instead.';
+
+
+--
+-- Name: current_user_managed_guild_ids(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.current_user_managed_guild_ids() RETURNS SETOF bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+  select guild_id
+    from app_public.web_user_guilds
+   where user_id = app_public.current_user_id()
+     and manage_guild;
+$$;
+
+
+--
+-- Name: has_manage_guild(bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.has_manage_guild(permissions bigint) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    select (permissions & x'00000020'::bigint) = x'00000020'::bigint;
+$$;
+
+
+--
+-- Name: logout(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.logout() RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+begin
+  -- Delete the session
+  delete from app_private.sessions
+        where uuid = app_public.current_session_id();
+  -- Clear the identifier from the transaction
+  perform set_config('jwt.claims.session_id', '', true);
+end;
+$$;
+
+
+--
+-- Name: timeframe_user_levels(app_hidden.level_timeframe, bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint DEFAULT NULL::bigint) RETURNS TABLE(user_id bigint, avatar_url text, username text, discriminator integer, xp bigint, xp_diff bigint, current_level bigint, gained_levels bigint, next_level_xp_required bigint, next_level_xp_progress bigint)
+    LANGUAGE sql STABLE
+    AS $$
+  select t.user_id,
+         avatar_url,
+         name as username,
+         discriminator,
+         t.xp,
+         t.xp_diff,
+         current_level,
+         gained_levels,
+         next_level_xp_required,
+         next_level_xp_progress
+    from app_hidden.user_levels_filtered(timeframe, guild_id) t
+         -- join the cached users to get username/avatar/discrim
+         left join app_public.cached_users
+                on user_id = id,
+         -- lateral joins to reuse calculations, prob not needed considering
+         -- they're immutable functions which should be optimized
+         lateral (select app_hidden.level_from_xp(xp)
+                         as current_level
+                 ) c,
+         -- required xp to level up ie
+         -- level 2 -> 3 = 200xp
+         -- level 3 -> 4 = 300xp, etc
+         lateral (select current_level * 100
+                         as next_level_xp_required
+                 ) r,
+         -- how much xp a user has progressed in a single level
+         -- ie if they are level 2 and they have 150 xp, level 1 required 100xp
+         -- this will return 50xp
+         lateral (select xp - app_hidden.total_xp_from_level(current_level)
+                         as next_level_xp_progress
+                 ) p,
+         lateral (select (current_level - app_hidden.level_from_xp(xp - t.xp_diff))
+                         as gained_levels
+                 ) g
+      order by xp_diff desc,
+               -- if xp_diff is null, then it will sort by xp (i think)
+               xp desc,
+               user_id desc;
+$$;
+
+
+--
+-- Name: FUNCTION timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint); Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint) IS 'Leaderboard for given timeframe and optional guild. If guild is null, it is the global leaderboard';
+
+
+--
+-- Name: cached_users; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.cached_users (
+    id bigint NOT NULL,
+    avatar_url text NOT NULL,
+    name text NOT NULL,
+    discriminator integer NOT NULL,
+    last_checked timestamp without time zone NOT NULL
+);
+
+
+--
+-- Name: TABLE cached_users; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON TABLE app_public.cached_users IS '@omit all,filter';
+
+
+--
+-- Name: user_levels_global_cached_user(bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.user_levels_global_cached_user(user_id bigint) RETURNS app_public.cached_users
+    LANGUAGE sql STABLE
+    AS $$
+  select *
+    from app_public.cached_users
+   where id = user_id;
+$$;
+
 
 --
 -- Name: failures; Type: TABLE; Schema: app_hidden; Owner: -
@@ -97,31 +726,48 @@ CREATE TABLE app_hidden.failures (
 
 
 --
+-- Name: sessions; Type: TABLE; Schema: app_private; Owner: -
+--
+
+CREATE TABLE app_private.sessions (
+    uuid uuid DEFAULT public.gen_random_uuid() NOT NULL,
+    user_id bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_active timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: user_authentication_secrets; Type: TABLE; Schema: app_private; Owner: -
+--
+
+CREATE TABLE app_private.user_authentication_secrets (
+    user_id bigint NOT NULL,
+    details jsonb DEFAULT '{}'::jsonb NOT NULL
+);
+
+
+--
 -- Name: cached_guilds; Type: TABLE; Schema: app_public; Owner: -
 --
 
 CREATE TABLE app_public.cached_guilds (
     id bigint NOT NULL,
     name text NOT NULL,
-    member_count bigint NOT NULL,
-    icon_url text,
-    features text NOT NULL,
-    splash_url text,
-    banner_url text
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    icon text,
+    splash text,
+    banner text,
+    features text[] DEFAULT '{}'::text[] NOT NULL
 );
 
 
 --
--- Name: cached_users; Type: TABLE; Schema: app_public; Owner: -
+-- Name: TABLE cached_guilds; Type: COMMENT; Schema: app_public; Owner: -
 --
 
-CREATE TABLE app_public.cached_users (
-    id bigint NOT NULL,
-    avatar_url text NOT NULL,
-    name text NOT NULL,
-    discriminator integer NOT NULL,
-    last_checked timestamp without time zone NOT NULL
-);
+COMMENT ON TABLE app_public.cached_guilds IS '@omit all,filter';
 
 
 --
@@ -301,6 +947,13 @@ CREATE TABLE app_public.user_levels (
 
 
 --
+-- Name: TABLE user_levels; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON TABLE app_public.user_levels IS '@omit all,filter';
+
+
+--
 -- Name: users; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -318,11 +971,52 @@ CREATE TABLE app_public.users (
 
 
 --
+-- Name: web_guilds; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.web_guilds (
+    id bigint NOT NULL,
+    name text NOT NULL,
+    icon text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: web_user_guilds; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.web_user_guilds (
+    user_id bigint NOT NULL,
+    guild_id bigint NOT NULL,
+    permissions bigint NOT NULL,
+    manage_guild boolean GENERATED ALWAYS AS (((permissions & ('00000000000000000000000000100000'::"bit")::bigint) = ('00000000000000000000000000100000'::"bit")::bigint)) STORED
+);
+
+
+--
 -- Name: failures failures_pkey; Type: CONSTRAINT; Schema: app_hidden; Owner: -
 --
 
 ALTER TABLE ONLY app_hidden.failures
     ADD CONSTRAINT failures_pkey PRIMARY KEY (failure_id);
+
+
+--
+-- Name: sessions sessions_pkey; Type: CONSTRAINT; Schema: app_private; Owner: -
+--
+
+ALTER TABLE ONLY app_private.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (uuid);
+
+
+--
+-- Name: user_authentication_secrets user_authentication_secrets_pkey; Type: CONSTRAINT; Schema: app_private; Owner: -
+--
+
+ALTER TABLE ONLY app_private.user_authentication_secrets
+    ADD CONSTRAINT user_authentication_secrets_pkey PRIMARY KEY (user_id);
 
 
 --
@@ -446,6 +1140,37 @@ ALTER TABLE ONLY app_public.users
 
 
 --
+-- Name: web_guilds web_guilds_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.web_guilds
+    ADD CONSTRAINT web_guilds_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: web_user_guilds web_user_guilds_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.web_user_guilds
+    ADD CONSTRAINT web_user_guilds_pkey PRIMARY KEY (user_id, guild_id);
+
+
+--
+-- Name: web_users web_users_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.web_users
+    ADD CONSTRAINT web_users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sessions_user_id_idx; Type: INDEX; Schema: app_private; Owner: -
+--
+
+CREATE INDEX sessions_user_id_idx ON app_private.sessions USING btree (user_id);
+
+
+--
 -- Name: notification_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
 --
 
@@ -467,6 +1192,50 @@ CREATE INDEX tag_name_idx ON app_public.tags USING gin (tag_name public.gin_trgm
 
 
 --
+-- Name: web_user_guilds_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX web_user_guilds_guild_id_idx ON app_public.web_user_guilds USING btree (guild_id);
+
+
+--
+-- Name: web_user_guilds_user_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX web_user_guilds_user_id_idx ON app_public.web_user_guilds USING btree (user_id);
+
+
+--
+-- Name: cached_guilds _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.cached_guilds FOR EACH ROW EXECUTE FUNCTION app_private.tg__timestamps();
+
+
+--
+-- Name: web_users _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.web_users FOR EACH ROW EXECUTE FUNCTION app_private.tg__timestamps();
+
+
+--
+-- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: app_private; Owner: -
+--
+
+ALTER TABLE ONLY app_private.sessions
+    ADD CONSTRAINT sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES app_public.web_users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_authentication_secrets user_authentication_secrets_user_id_fkey; Type: FK CONSTRAINT; Schema: app_private; Owner: -
+--
+
+ALTER TABLE ONLY app_private.user_authentication_secrets
+    ADD CONSTRAINT user_authentication_secrets_user_id_fkey FOREIGN KEY (user_id) REFERENCES app_public.web_users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: feed_subscriptions fk_feed_subscription_feed_id; Type: FK CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -483,6 +1252,112 @@ ALTER TABLE ONLY app_public.mutes
 
 
 --
+-- Name: web_user_guilds web_user_guilds_guild_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.web_user_guilds
+    ADD CONSTRAINT web_user_guilds_guild_id_fkey FOREIGN KEY (guild_id) REFERENCES app_public.cached_guilds(id) ON DELETE CASCADE;
+
+
+--
+-- Name: web_user_guilds web_user_guilds_user_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.web_user_guilds
+    ADD CONSTRAINT web_user_guilds_user_id_fkey FOREIGN KEY (user_id) REFERENCES app_public.web_users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sessions; Type: ROW SECURITY; Schema: app_private; Owner: -
+--
+
+ALTER TABLE app_private.sessions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_authentication_secrets; Type: ROW SECURITY; Schema: app_private; Owner: -
+--
+
+ALTER TABLE app_private.user_authentication_secrets ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: cached_guilds; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.cached_guilds ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: cached_users; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.cached_users ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: guild_configs; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.guild_configs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: cached_guilds select_all; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_all ON app_public.cached_guilds FOR SELECT USING (true);
+
+
+--
+-- Name: cached_users select_all; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_all ON app_public.cached_users FOR SELECT USING (true);
+
+
+--
+-- Name: user_levels select_all; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_all ON app_public.user_levels FOR SELECT USING (true);
+
+
+--
+-- Name: guild_configs select_managed_guild; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_managed_guild ON app_public.guild_configs FOR SELECT USING ((id IN ( SELECT app_public.current_user_managed_guild_ids() AS current_user_managed_guild_ids)));
+
+
+--
+-- Name: web_users select_self; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_self ON app_public.web_users FOR SELECT USING ((id = app_public.current_user_id()));
+
+
+--
+-- Name: web_users update_self; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY update_self ON app_public.web_users FOR UPDATE USING ((id = app_public.current_user_id()));
+
+
+--
+-- Name: user_levels; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.user_levels ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: web_guilds; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.web_guilds ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: web_users; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.web_users ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: SCHEMA app_hidden; Type: ACL; Schema: -; Owner: -
 --
 
@@ -494,6 +1369,205 @@ GRANT USAGE ON SCHEMA app_hidden TO sushii_visitor;
 --
 
 GRANT USAGE ON SCHEMA app_public TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION current_level_progressed_xp(xp bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.current_level_progressed_xp(xp bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.current_level_progressed_xp(xp bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION has_manage_guild(permissions bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.has_manage_guild(permissions bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.has_manage_guild(permissions bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION level_from_xp(xp bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.level_from_xp(xp bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.level_from_xp(xp bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION total_xp_from_level(level bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.total_xp_from_level(level bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.total_xp_from_level(level bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION user_levels_filtered(f_timeframe app_hidden.level_timeframe, f_guild_id bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.user_levels_filtered(f_timeframe app_hidden.level_timeframe, f_guild_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.user_levels_filtered(f_timeframe app_hidden.level_timeframe, f_guild_id bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION xp_from_level(level bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.xp_from_level(level bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.xp_from_level(level bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION xp_required_to_next_level(xp bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.xp_required_to_next_level(xp bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.xp_required_to_next_level(xp bigint) TO sushii_visitor;
+
+
+--
+-- Name: TABLE web_users; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.web_users TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION login_or_register_user(f_discord_user_id character varying, f_profile json, f_auth_details json); Type: ACL; Schema: app_private; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_private.login_or_register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION register_user(f_discord_user_id character varying, f_profile json, f_auth_details json); Type: ACL; Schema: app_private; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_private.register_user(f_discord_user_id character varying, f_profile json, f_auth_details json) FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION tg__timestamps(); Type: ACL; Schema: app_private; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_private.tg__timestamps() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION current_session_id(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.current_session_id() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.current_session_id() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION "current_user"(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public."current_user"() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public."current_user"() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION current_user_guild_ids(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.current_user_guild_ids() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.current_user_guild_ids() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION current_user_id(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.current_user_id() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.current_user_id() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION current_user_managed_guild_ids(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.current_user_managed_guild_ids() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.current_user_managed_guild_ids() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION has_manage_guild(permissions bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.has_manage_guild(permissions bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.has_manage_guild(permissions bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION logout(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.logout() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.logout() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint) TO sushii_visitor;
+
+
+--
+-- Name: TABLE cached_users; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.cached_users TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION user_levels_global_cached_user(user_id bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.user_levels_global_cached_user(user_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.user_levels_global_cached_user(user_id bigint) TO sushii_visitor;
+
+
+--
+-- Name: TABLE cached_guilds; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.cached_guilds TO sushii_visitor;
+
+
+--
+-- Name: TABLE guild_configs; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: TABLE user_levels; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.user_levels TO sushii_visitor;
+
+
+--
+-- Name: TABLE web_guilds; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.web_guilds TO sushii_visitor;
 
 
 --

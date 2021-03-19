@@ -5,14 +5,10 @@
 -- we don't directly use user_levels table, use view below to calculate levels stuff
 -- alter table app_public.user_levels enable row level security;
 
--- anyone can view all guilds
+-- anyone can view all
 alter table app_public.cached_guilds enable row level security;
--- allow user_levels to be selected, hide direct access since this is only used
--- for leaderboards
-alter table app_public.user_levels enable row level security;
--- allow cached_users to be selected, hide direct access since this is only used
--- for leaderboards
-alter table app_public.cached_users enable row level security;
+alter table app_public.user_levels   enable row level security;
+alter table app_public.cached_users  enable row level security;
 
 drop policy if exists select_all on app_public.cached_guilds;
 drop policy if exists select_all on app_public.user_levels;
@@ -208,7 +204,6 @@ comment on function app_public.timeframe_user_levels is
 
 /**********/
 
-
 -- now auth stuff
 
 /**********/
@@ -271,6 +266,7 @@ create table app_public.web_users (
     discriminator int         not null,
     -- avatar hash
     avatar        text,
+    -- just me, for future administrative uses
     is_admin      boolean     not null default false,
     -- oauth info
     details jsonb not null default '{}'::jsonb,
@@ -340,29 +336,21 @@ create trigger _100_timestamps
 -- should only contain guilds with manage guild permissions
 drop table if exists app_public.web_user_guilds cascade;
 create table app_public.web_user_guilds (
-    user_id     bigint not null,
-    guild_id    bigint not null,
-    permissions bigint not null,
+    user_id     bigint  not null references app_public.web_users     on delete cascade,
+    guild_id    bigint  not null references app_public.cached_guilds on delete cascade,
+    -- if user is owner of guild
+    owner       boolean not null,
+    permissions bigint  not null,
     -- https://discord.com/developers/docs/topics/permissions#permissions
     -- true if user has manage_guild
     manage_guild boolean generated always
       as ((permissions & x'00000020'::bigint) = x'00000020'::bigint) stored,
-    -- user_id fkey
-    constraint web_user_guilds_user_id_fkey
-        foreign key(user_id)
-        references app_public.web_users(id)
-            on delete cascade,
-    -- guild_id fkey
-    constraint web_user_guilds_guild_id_fkey
-        foreign key(guild_id)
-        references app_public.cached_guilds(id)
-            on delete cascade,
     -- composite key
     primary key (user_id, guild_id)
 );
--- index on user_id since we only care about listing all a user's guilds
-create index on app_public.web_user_guilds (user_id);
-create index on app_public.web_user_guilds (guild_id);
+
+create index on app_public.web_user_guilds(user_id);
+create index on app_public.web_user_guilds(guild_id);
 
 -- get all guild ids a user is in where user has managed_guild permission
 -- ignores servers user doesn't have manage_guild in.
@@ -374,14 +362,59 @@ create function app_public.current_user_managed_guild_ids() returns setof bigint
   select guild_id
     from app_public.web_user_guilds
    where user_id = app_public.current_user_id()
-     and manage_guild;
+     and manage_guild
+      or owner;
 $$ language sql stable security definer set search_path = pg_catalog, public, pg_temp;
+
+alter table app_public.web_user_guilds enable row level security;
+-- only allow owner or manage_guild users to view guild configs
+create policy select_web_user_guilds on app_public.web_user_guilds
+  for select using (manage_guild or owner);
+grant select on app_public.web_user_guilds to :DATABASE_VISITOR;
 
 -- enable rls to guild configs so it shows up
 alter table app_public.guild_configs enable row level security;
+-- only allow owner or manage_guild users to view guild configs
 create policy select_managed_guild on app_public.guild_configs
   for select using (id in (select app_public.current_user_managed_guild_ids()));
+create policy update_managed_guild on app_public.guild_configs
+  for update using (id in (select app_public.current_user_managed_guild_ids()));
 grant select on app_public.guild_configs to :DATABASE_VISITOR;
+grant update(
+  prefix,
+  join_msg,
+  join_msg_enabled,
+  join_react,
+  leave_msg,
+  leave_msg_enabled,
+  msg_channel,
+  role_channel,
+  role_config,
+  role_enabled,
+  invite_guard,
+  log_msg,
+  log_msg_enabled,
+  log_mod,
+  log_mod_enabled,
+  log_member,
+  log_member_enabled,
+  mute_role,
+  mute_duration,
+  mute_dm_text,
+  mute_dm_enabled,
+  warn_dm_text,
+  warn_dm_enabled,
+  max_mention,
+  disabled_channels
+) on app_public.guild_configs to :DATABASE_VISITOR;
+
+-- add fkey to guild configs to point to cached guild so we can get guild name etc
+alter table app_public.guild_configs
+  drop constraint if exists guild_configs_cached_guild_fkey;
+alter table app_public.guild_configs
+  add constraint guild_configs_cached_guild_fkey
+  foreign key (id)
+  references app_public.cached_guilds(id);
 
 /**********/
 
@@ -454,13 +487,15 @@ begin
          into v_user;
 
   -- Insert guilds
-  insert into app_public.cached_guilds (id, name, icon)
+  insert into app_public.cached_guilds (id, name, icon, features)
        select (value->>'id')::bigint as guild_id,
               value->>'name',
-              value->>'icon'
+              value->>'icon',
+              array(select json_array_elements_text(value->'features'))
          from json_array_elements(v_user_guilds)
               -- only save guilds where user has manage guild permissions
         where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+           or (value->>'owner')::boolean
            on conflict (id)
               do update
               set name = excluded.name,
@@ -468,12 +503,14 @@ begin
 
   -- Insert web guilds, should not conflict since new user means they will have no entries
   -- if this runs into error means it's re-registering a user I think
-  insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+  insert into app_public.web_user_guilds (user_id, guild_id, owner, permissions)
        select f_discord_user_id::bigint as user_id,
               (value->>'id')::bigint,
+              (value->>'owner')::boolean,
               (value->>'permissions')::bigint
          from json_array_elements(v_user_guilds)
-        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint;
+        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+           or (value->>'owner')::boolean;
 
   -- Insert the user’s private account data (e.g. OAuth tokens)
   insert into app_private.user_authentication_secrets (user_id, details)
@@ -546,12 +583,14 @@ begin
      where user_id = v_matched_user_id;
 
     -- Update guild data
-    insert into app_public.web_guilds (id, name, icon)
+    insert into app_public.cached_guilds (id, name, icon, features)
          select (value->>'id')::bigint,
                 value->>'name',
-                value->>'icon'
+                value->>'icon',
+                array(select json_array_elements_text(value->'features'))
            from json_array_elements(v_user_guilds)
           where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+             or (value->>'owner')::boolean
              on conflict (id)
                 do update
                 set name = excluded.name,
@@ -567,13 +606,15 @@ begin
                  where guild_id is not null);
 
     -- Update user guilds
-    insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+    insert into app_public.web_user_guilds (user_id, guild_id, owner, permissions)
          select f_discord_user_id::bigint as user_id,
                 (value->>'id')::bigint,
+                (value->>'owner')::boolean,
                 (value->>'permissions')::bigint
            from json_array_elements(v_user_guilds)
                 -- only save guilds where user has manage guild permissions
                 where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+                   or (value->>'owner')::boolean
                 on conflict (user_id, guild_id)
                    do update
                    set permissions = excluded.permissions;

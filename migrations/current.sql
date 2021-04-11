@@ -9,14 +9,17 @@
 alter table app_public.cached_guilds enable row level security;
 alter table app_public.user_levels   enable row level security;
 alter table app_public.cached_users  enable row level security;
+alter table app_public.tags          enable row level security;
 
 drop policy if exists select_all on app_public.cached_guilds;
 drop policy if exists select_all on app_public.user_levels;
 drop policy if exists select_all on app_public.cached_users;
+drop policy if exists select_all on app_public.tags;
 
 create policy select_all on app_public.cached_guilds for select using (true);
 create policy select_all on app_public.user_levels   for select using (true);
 create policy select_all on app_public.cached_users  for select using (true);
+create policy select_all on app_public.tags          for select using (true);
 
 -- without grants, gets an rls error
 -- "And in fact is likely a GRANT issue; e.g. you've used column-level select
@@ -24,11 +27,15 @@ create policy select_all on app_public.cached_users  for select using (true);
 grant select on app_public.cached_guilds to :DATABASE_VISITOR;
 grant select on app_public.user_levels   to :DATABASE_VISITOR;
 grant select on app_public.cached_users  to :DATABASE_VISITOR;
+grant select on app_public.tags          to :DATABASE_VISITOR;
 
--- disable getting all guilds at once, only allow getting by id
+-- disable getting all at once, only allow getting by id
 comment on table app_public.cached_guilds is E'@omit all,filter';
 comment on table app_public.user_levels   is E'@omit all,filter';
 comment on table app_public.cached_users  is E'@omit all,filter';
+-- comment on table app_public.tags          is E'@omit all,filter';
+-- tags table needs to use all and filter to get guild tags
+comment on table app_public.tags          is NULL;
 
 -- add views and stuff for calculating user XP for leaderboards
 

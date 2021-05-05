@@ -2,8 +2,8 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 12.4 (Debian 12.4-1.pgdg100+1)
--- Dumped by pg_dump version 12.5 (Ubuntu 12.5-0ubuntu0.20.04.1)
+-- Dumped from database version 12.6
+-- Dumped by pg_dump version 12.6 (Ubuntu 12.6-0ubuntu0.20.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -15,6 +15,20 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
+
+--
+-- Name: timescaledb; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS timescaledb WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION timescaledb; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION timescaledb IS 'Enables scalable inserts and complex queries for time-series data';
+
 
 --
 -- Name: app_hidden; Type: SCHEMA; Schema: -; Owner: -
@@ -88,6 +102,17 @@ CREATE TYPE app_hidden.level_timeframe AS ENUM (
     'DAY',
     'WEEK',
     'MONTH'
+);
+
+
+--
+-- Name: rule_scope; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.rule_scope AS ENUM (
+    'GUILD',
+    'CHANNEL',
+    'USER'
 );
 
 
@@ -374,12 +399,14 @@ begin
      where user_id = v_matched_user_id;
 
     -- Update guild data
-    insert into app_public.web_guilds (id, name, icon)
+    insert into app_public.cached_guilds (id, name, icon, features)
          select (value->>'id')::bigint,
                 value->>'name',
-                value->>'icon'
+                value->>'icon',
+                array(select json_array_elements_text(value->'features'))
            from json_array_elements(v_user_guilds)
           where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+             or (value->>'owner')::boolean
              on conflict (id)
                 do update
                 set name = excluded.name,
@@ -395,13 +422,15 @@ begin
                  where guild_id is not null);
 
     -- Update user guilds
-    insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+    insert into app_public.web_user_guilds (user_id, guild_id, owner, permissions)
          select f_discord_user_id::bigint as user_id,
                 (value->>'id')::bigint,
+                (value->>'owner')::boolean,
                 (value->>'permissions')::bigint
            from json_array_elements(v_user_guilds)
                 -- only save guilds where user has manage guild permissions
                 where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+                   or (value->>'owner')::boolean
                 on conflict (user_id, guild_id)
                    do update
                    set permissions = excluded.permissions;
@@ -447,13 +476,15 @@ begin
          into v_user;
 
   -- Insert guilds
-  insert into app_public.cached_guilds (id, name, icon)
+  insert into app_public.cached_guilds (id, name, icon, features)
        select (value->>'id')::bigint as guild_id,
               value->>'name',
-              value->>'icon'
+              value->>'icon',
+              array(select json_array_elements_text(value->'features'))
          from json_array_elements(v_user_guilds)
               -- only save guilds where user has manage guild permissions
         where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+           or (value->>'owner')::boolean
            on conflict (id)
               do update
               set name = excluded.name,
@@ -461,12 +492,14 @@ begin
 
   -- Insert web guilds, should not conflict since new user means they will have no entries
   -- if this runs into error means it's re-registering a user I think
-  insert into app_public.web_user_guilds (user_id, guild_id, permissions)
+  insert into app_public.web_user_guilds (user_id, guild_id, owner, permissions)
        select f_discord_user_id::bigint as user_id,
               (value->>'id')::bigint,
+              (value->>'owner')::boolean,
               (value->>'permissions')::bigint
          from json_array_elements(v_user_guilds)
-        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint;
+        where ((value->>'permissions')::bigint & x'00000020'::bigint) = x'00000020'::bigint
+           or (value->>'owner')::boolean;
 
   -- Insert the user’s private account data (e.g. OAuth tokens)
   insert into app_private.user_authentication_secrets (user_id, details)
@@ -591,7 +624,8 @@ CREATE FUNCTION app_public.current_user_managed_guild_ids() RETURNS SETOF bigint
   select guild_id
     from app_public.web_user_guilds
    where user_id = app_public.current_user_id()
-     and manage_guild;
+     and manage_guild
+      or owner;
 $$;
 
 
@@ -748,18 +782,29 @@ CREATE TABLE app_private.user_authentication_secrets (
 
 
 --
+-- Name: bans; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.bans (
+    guild_id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    reason text
+);
+
+
+--
 -- Name: cached_guilds; Type: TABLE; Schema: app_public; Owner: -
 --
 
 CREATE TABLE app_public.cached_guilds (
     id bigint NOT NULL,
     name text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
     icon text,
     splash text,
     banner text,
-    features text[] DEFAULT '{}'::text[] NOT NULL
+    features text[] DEFAULT '{}'::text[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -833,6 +878,42 @@ CREATE TABLE app_public.guild_configs (
     warn_dm_enabled boolean DEFAULT true NOT NULL,
     max_mention integer,
     disabled_channels bigint[]
+);
+
+
+--
+-- Name: guild_rule_sets; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.guild_rule_sets (
+    id uuid NOT NULL,
+    guild_id bigint NOT NULL,
+    name text NOT NULL,
+    description text,
+    enabled boolean NOT NULL,
+    editable boolean NOT NULL,
+    author bigint,
+    category text,
+    config json,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: guild_rules; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.guild_rules (
+    id uuid NOT NULL,
+    set_id uuid NOT NULL,
+    name text NOT NULL,
+    enabled boolean NOT NULL,
+    trigger jsonb,
+    conditions jsonb,
+    actions jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -918,6 +999,43 @@ CREATE TABLE app_public.reminders (
 
 
 --
+-- Name: rule_counters; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.rule_counters (
+    "time" timestamp with time zone NOT NULL,
+    guild_id bigint NOT NULL,
+    name text NOT NULL
+);
+
+
+--
+-- Name: rule_gauges; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.rule_gauges (
+    "time" timestamp with time zone NOT NULL,
+    guild_id bigint NOT NULL,
+    scope app_public.rule_scope NOT NULL,
+    scope_id bigint NOT NULL,
+    name text NOT NULL,
+    value bigint NOT NULL
+);
+
+
+--
+-- Name: rule_persistence; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.rule_persistence (
+    guild_id bigint NOT NULL,
+    scope app_public.rule_scope NOT NULL,
+    scope_id bigint NOT NULL,
+    data jsonb NOT NULL
+);
+
+
+--
 -- Name: tags; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -990,6 +1108,7 @@ CREATE TABLE app_public.web_guilds (
 CREATE TABLE app_public.web_user_guilds (
     user_id bigint NOT NULL,
     guild_id bigint NOT NULL,
+    owner boolean NOT NULL,
     permissions bigint NOT NULL,
     manage_guild boolean GENERATED ALWAYS AS (((permissions & ('00000000000000000000000000100000'::"bit")::bigint) = ('00000000000000000000000000100000'::"bit")::bigint)) STORED
 );
@@ -1017,6 +1136,14 @@ ALTER TABLE ONLY app_private.sessions
 
 ALTER TABLE ONLY app_private.user_authentication_secrets
     ADD CONSTRAINT user_authentication_secrets_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: bans bans_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.bans
+    ADD CONSTRAINT bans_pkey PRIMARY KEY (guild_id, user_id);
 
 
 --
@@ -1068,6 +1195,22 @@ ALTER TABLE ONLY app_public.guild_configs
 
 
 --
+-- Name: guild_rule_sets guild_rule_sets_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rule_sets
+    ADD CONSTRAINT guild_rule_sets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guild_rules guild_rules_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rules
+    ADD CONSTRAINT guild_rules_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: members members_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1113,6 +1256,30 @@ ALTER TABLE ONLY app_public.notifications
 
 ALTER TABLE ONLY app_public.reminders
     ADD CONSTRAINT reminders_pkey PRIMARY KEY (user_id, set_at);
+
+
+--
+-- Name: rule_counters rule_counters_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.rule_counters
+    ADD CONSTRAINT rule_counters_pkey PRIMARY KEY ("time", guild_id, name);
+
+
+--
+-- Name: rule_gauges rule_gauges_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.rule_gauges
+    ADD CONSTRAINT rule_gauges_pkey PRIMARY KEY ("time", guild_id, scope, scope_id, name);
+
+
+--
+-- Name: rule_persistence rule_persistence_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.rule_persistence
+    ADD CONSTRAINT rule_persistence_pkey PRIMARY KEY (guild_id, scope, scope_id);
 
 
 --
@@ -1171,6 +1338,27 @@ CREATE INDEX sessions_user_id_idx ON app_private.sessions USING btree (user_id);
 
 
 --
+-- Name: bans_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX bans_guild_id_idx ON app_public.bans USING btree (guild_id);
+
+
+--
+-- Name: bans_user_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX bans_user_id_idx ON app_public.bans USING btree (user_id);
+
+
+--
+-- Name: cached_guilds_features_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX cached_guilds_features_idx ON app_public.cached_guilds USING gin (features);
+
+
+--
 -- Name: notification_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
 --
 
@@ -1182,6 +1370,34 @@ CREATE INDEX notification_guild_id_idx ON app_public.notifications USING btree (
 --
 
 CREATE INDEX notification_keyword_idx ON app_public.notifications USING btree (keyword);
+
+
+--
+-- Name: rule_counters_guild_id_name_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_counters_guild_id_name_time_idx ON app_public.rule_counters USING btree (guild_id, name, "time" DESC);
+
+
+--
+-- Name: rule_counters_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_counters_time_idx ON app_public.rule_counters USING btree ("time" DESC);
+
+
+--
+-- Name: rule_gauges_guild_id_scope_scope_id_name_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_gauges_guild_id_scope_scope_id_name_time_idx ON app_public.rule_gauges USING btree (guild_id, scope, scope_id, name, "time" DESC);
+
+
+--
+-- Name: rule_gauges_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_gauges_time_idx ON app_public.rule_gauges USING btree ("time" DESC);
 
 
 --
@@ -1220,6 +1436,20 @@ CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.web_users F
 
 
 --
+-- Name: rule_counters ts_insert_blocker; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER ts_insert_blocker BEFORE INSERT ON app_public.rule_counters FOR EACH ROW EXECUTE FUNCTION _timescaledb_internal.insert_blocker();
+
+
+--
+-- Name: rule_gauges ts_insert_blocker; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER ts_insert_blocker BEFORE INSERT ON app_public.rule_gauges FOR EACH ROW EXECUTE FUNCTION _timescaledb_internal.insert_blocker();
+
+
+--
 -- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: app_private; Owner: -
 --
 
@@ -1249,6 +1479,22 @@ ALTER TABLE ONLY app_public.feed_subscriptions
 
 ALTER TABLE ONLY app_public.mutes
     ADD CONSTRAINT fk_mod_action FOREIGN KEY (guild_id, case_id) REFERENCES app_public.mod_logs(guild_id, case_id);
+
+
+--
+-- Name: guild_configs guild_configs_cached_guild_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_configs
+    ADD CONSTRAINT guild_configs_cached_guild_fkey FOREIGN KEY (id) REFERENCES app_public.cached_guilds(id);
+
+
+--
+-- Name: guild_rules guild_rules_set_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rules
+    ADD CONSTRAINT guild_rules_set_id_fkey FOREIGN KEY (set_id) REFERENCES app_public.guild_rule_sets(id);
 
 
 --
@@ -1298,6 +1544,18 @@ ALTER TABLE app_public.cached_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app_public.guild_configs ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: guild_rule_sets; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.guild_rule_sets ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: guild_rules; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.guild_rules ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: cached_guilds select_all; Type: POLICY; Schema: app_public; Owner: -
 --
 
@@ -1309,6 +1567,13 @@ CREATE POLICY select_all ON app_public.cached_guilds FOR SELECT USING (true);
 --
 
 CREATE POLICY select_all ON app_public.cached_users FOR SELECT USING (true);
+
+
+--
+-- Name: tags select_all; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_all ON app_public.tags FOR SELECT USING (true);
 
 
 --
@@ -1333,6 +1598,26 @@ CREATE POLICY select_self ON app_public.web_users FOR SELECT USING ((id = app_pu
 
 
 --
+-- Name: web_user_guilds select_web_user_guilds; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_web_user_guilds ON app_public.web_user_guilds FOR SELECT USING ((manage_guild OR owner));
+
+
+--
+-- Name: tags; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.tags ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: guild_configs update_managed_guild; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY update_managed_guild ON app_public.guild_configs FOR UPDATE USING ((id IN ( SELECT app_public.current_user_managed_guild_ids() AS current_user_managed_guild_ids)));
+
+
+--
 -- Name: web_users update_self; Type: POLICY; Schema: app_public; Owner: -
 --
 
@@ -1350,6 +1635,12 @@ ALTER TABLE app_public.user_levels ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app_public.web_guilds ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: web_user_guilds; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.web_user_guilds ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: web_users; Type: ROW SECURITY; Schema: app_public; Owner: -
@@ -1557,6 +1848,195 @@ GRANT SELECT ON TABLE app_public.guild_configs TO sushii_visitor;
 
 
 --
+-- Name: COLUMN guild_configs.id; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(id) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.prefix; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(prefix) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.join_msg; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(join_msg) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.join_msg_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(join_msg_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.join_react; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(join_react) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.leave_msg; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(leave_msg) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.leave_msg_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(leave_msg_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.msg_channel; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(msg_channel) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.role_channel; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(role_channel) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.role_config; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(role_config) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.role_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(role_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.invite_guard; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(invite_guard) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.log_msg; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(log_msg) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.log_msg_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(log_msg_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.log_mod; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(log_mod) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.log_mod_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(log_mod_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.log_member; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(log_member) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.log_member_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(log_member_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.mute_role; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(mute_role) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.mute_duration; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(mute_duration) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.mute_dm_text; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(mute_dm_text) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.mute_dm_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(mute_dm_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.warn_dm_text; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(warn_dm_text) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.warn_dm_enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(warn_dm_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.max_mention; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(max_mention) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.disabled_channels; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: TABLE tags; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.tags TO sushii_visitor;
+
+
+--
 -- Name: TABLE user_levels; Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -1568,6 +2048,13 @@ GRANT SELECT ON TABLE app_public.user_levels TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.web_guilds TO sushii_visitor;
+
+
+--
+-- Name: TABLE web_user_guilds; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.web_user_guilds TO sushii_visitor;
 
 
 --

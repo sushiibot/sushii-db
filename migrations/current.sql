@@ -27,6 +27,10 @@ create table app_public.guild_rules (
     updated_at timestamptz not null default now()
 );
 
+create index on app_public.guild_rule_sets(guild_id);
+create index on app_public.guild_rules(guild_id);
+create index on app_public.guild_rules(set_id);
+
 alter table app_public.guild_rule_sets enable row level security;
 alter table app_public.guild_rules     enable row level security;
 

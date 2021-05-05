@@ -13,4 +13,8 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 -- enable uuids
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
+-- timescaledb
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 COMMIT;

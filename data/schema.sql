@@ -106,6 +106,40 @@ CREATE TYPE app_hidden.level_timeframe AS ENUM (
 
 
 --
+-- Name: rule_scope; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.rule_scope AS ENUM (
+    'GUILD',
+    'CHANNEL',
+    'USER'
+);
+
+
+--
+-- Name: current_level_progressed_xp(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.current_level_progressed_xp(xp bigint) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+  -- xp required for next level = (next level + 1) total xp required
+  select app_hidden.xp_from_level(app_hidden.level_from_xp(xp) + 1) - xp;
+$$;
+
+
+--
+-- Name: has_manage_guild(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.has_manage_guild(permissions bigint) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    select (permissions & x'00000020'::bigint) = x'00000020'::bigint;
+$$;
+
+
+--
 -- Name: level_from_xp(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
 --
 
@@ -113,6 +147,21 @@ CREATE FUNCTION app_hidden.level_from_xp(xp bigint) RETURNS bigint
     LANGUAGE sql IMMUTABLE
     AS $$
   select floor((sqrt(100 * (2 * xp + 25)) + 50) / 100)::bigint;
+$$;
+
+
+--
+-- Name: level_progress(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint) RETURNS record
+    LANGUAGE sql STABLE
+    AS $$
+  -- xp required for next level = (next level + 1) total xp required
+  select t.current_level,
+         (app_hidden.xp_from_level(current_level + 1) - xp) as next_level_xp_required,
+         (xp - app_hidden.xp_from_level(current_level)) as next_level_xp_progress
+    from (select app_hidden.level_from_xp(xp) as current_level) t;
 $$;
 
 
@@ -208,6 +257,18 @@ CREATE FUNCTION app_hidden.xp_from_level(level bigint) RETURNS bigint
     LANGUAGE sql IMMUTABLE
     AS $$
   select floor((pow(level, 2) + level) / 2 * 100 - (level * 100))::bigint;
+$$;
+
+
+--
+-- Name: xp_required_to_next_level(bigint); Type: FUNCTION; Schema: app_hidden; Owner: -
+--
+
+CREATE FUNCTION app_hidden.xp_required_to_next_level(xp bigint) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+  -- xp required for next level = (next level + 1) total xp required
+  select app_hidden.xp_from_level(app_hidden.level_from_xp(xp) + 1) - xp;
 $$;
 
 
@@ -518,6 +579,20 @@ COMMENT ON FUNCTION app_public."current_user"() IS 'The currently logged in user
 
 
 --
+-- Name: current_user_guild_ids(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.current_user_guild_ids() RETURNS SETOF bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+  select guild_id
+    from app_public.web_user_guilds
+   where user_id = app_public.current_user_id();
+$$;
+
+
+--
 -- Name: current_user_id(); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
@@ -551,6 +626,17 @@ CREATE FUNCTION app_public.current_user_managed_guild_ids() RETURNS SETOF bigint
    where user_id = app_public.current_user_id()
      and manage_guild
       or owner;
+$$;
+
+
+--
+-- Name: has_manage_guild(bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.has_manage_guild(permissions bigint) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+    select (permissions & x'00000020'::bigint) = x'00000020'::bigint;
 $$;
 
 
@@ -628,6 +714,39 @@ COMMENT ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_
 
 
 --
+-- Name: cached_users; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.cached_users (
+    id bigint NOT NULL,
+    avatar_url text NOT NULL,
+    name text NOT NULL,
+    discriminator integer NOT NULL,
+    last_checked timestamp without time zone NOT NULL
+);
+
+
+--
+-- Name: TABLE cached_users; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON TABLE app_public.cached_users IS '@omit all,filter';
+
+
+--
+-- Name: user_levels_global_cached_user(bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.user_levels_global_cached_user(user_id bigint) RETURNS app_public.cached_users
+    LANGUAGE sql STABLE
+    AS $$
+  select *
+    from app_public.cached_users
+   where id = user_id;
+$$;
+
+
+--
 -- Name: failures; Type: TABLE; Schema: app_hidden; Owner: -
 --
 
@@ -663,6 +782,17 @@ CREATE TABLE app_private.user_authentication_secrets (
 
 
 --
+-- Name: bans; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.bans (
+    guild_id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    reason text
+);
+
+
+--
 -- Name: cached_guilds; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -683,26 +813,6 @@ CREATE TABLE app_public.cached_guilds (
 --
 
 COMMENT ON TABLE app_public.cached_guilds IS '@omit all,filter';
-
-
---
--- Name: cached_users; Type: TABLE; Schema: app_public; Owner: -
---
-
-CREATE TABLE app_public.cached_users (
-    id bigint NOT NULL,
-    avatar_url text NOT NULL,
-    name text NOT NULL,
-    discriminator integer NOT NULL,
-    last_checked timestamp without time zone NOT NULL
-);
-
-
---
--- Name: TABLE cached_users; Type: COMMENT; Schema: app_public; Owner: -
---
-
-COMMENT ON TABLE app_public.cached_users IS '@omit all,filter';
 
 
 --
@@ -768,6 +878,50 @@ CREATE TABLE app_public.guild_configs (
     warn_dm_enabled boolean DEFAULT true NOT NULL,
     max_mention integer,
     disabled_channels bigint[]
+);
+
+
+--
+-- Name: TABLE guild_configs; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON TABLE app_public.guild_configs IS '@foreignKey (id) references app_public.cached_guilds (id)';
+
+
+--
+-- Name: guild_rule_sets; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.guild_rule_sets (
+    id uuid NOT NULL,
+    guild_id bigint NOT NULL,
+    name text NOT NULL,
+    description text,
+    enabled boolean NOT NULL,
+    editable boolean NOT NULL,
+    author bigint,
+    category text,
+    config json,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: guild_rules; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.guild_rules (
+    id uuid NOT NULL,
+    set_id uuid NOT NULL,
+    guild_id bigint NOT NULL,
+    name text NOT NULL,
+    enabled boolean NOT NULL,
+    trigger jsonb,
+    conditions jsonb,
+    actions jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -853,6 +1007,43 @@ CREATE TABLE app_public.reminders (
 
 
 --
+-- Name: rule_counters; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.rule_counters (
+    "time" timestamp with time zone NOT NULL,
+    guild_id bigint NOT NULL,
+    name text NOT NULL
+);
+
+
+--
+-- Name: rule_gauges; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.rule_gauges (
+    "time" timestamp with time zone NOT NULL,
+    guild_id bigint NOT NULL,
+    scope app_public.rule_scope NOT NULL,
+    scope_id bigint NOT NULL,
+    name text NOT NULL,
+    value bigint NOT NULL
+);
+
+
+--
+-- Name: rule_persistence; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.rule_persistence (
+    guild_id bigint NOT NULL,
+    scope app_public.rule_scope NOT NULL,
+    scope_id bigint NOT NULL,
+    data jsonb NOT NULL
+);
+
+
+--
 -- Name: tags; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -906,6 +1097,19 @@ CREATE TABLE app_public.users (
 
 
 --
+-- Name: web_guilds; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.web_guilds (
+    id bigint NOT NULL,
+    name text NOT NULL,
+    icon text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: web_user_guilds; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -916,6 +1120,14 @@ CREATE TABLE app_public.web_user_guilds (
     permissions bigint NOT NULL,
     manage_guild boolean GENERATED ALWAYS AS (((permissions & ('00000000000000000000000000100000'::"bit")::bigint) = ('00000000000000000000000000100000'::"bit")::bigint)) STORED
 );
+
+
+--
+-- Name: TABLE web_user_guilds; Type: COMMENT; Schema: app_public; Owner: -
+--
+
+COMMENT ON TABLE app_public.web_user_guilds IS '@foreignKey (user_id) references app_public.web_users (id)
+@foreignKey (guild_id) references app_public.cached_guilds (id)';
 
 
 --
@@ -940,6 +1152,14 @@ ALTER TABLE ONLY app_private.sessions
 
 ALTER TABLE ONLY app_private.user_authentication_secrets
     ADD CONSTRAINT user_authentication_secrets_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: bans bans_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.bans
+    ADD CONSTRAINT bans_pkey PRIMARY KEY (guild_id, user_id);
 
 
 --
@@ -991,6 +1211,22 @@ ALTER TABLE ONLY app_public.guild_configs
 
 
 --
+-- Name: guild_rule_sets guild_rule_sets_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rule_sets
+    ADD CONSTRAINT guild_rule_sets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guild_rules guild_rules_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rules
+    ADD CONSTRAINT guild_rules_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: members members_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1039,6 +1275,30 @@ ALTER TABLE ONLY app_public.reminders
 
 
 --
+-- Name: rule_counters rule_counters_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.rule_counters
+    ADD CONSTRAINT rule_counters_pkey PRIMARY KEY ("time", guild_id, name);
+
+
+--
+-- Name: rule_gauges rule_gauges_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.rule_gauges
+    ADD CONSTRAINT rule_gauges_pkey PRIMARY KEY ("time", guild_id, scope, scope_id, name);
+
+
+--
+-- Name: rule_persistence rule_persistence_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.rule_persistence
+    ADD CONSTRAINT rule_persistence_pkey PRIMARY KEY (guild_id, scope, scope_id);
+
+
+--
 -- Name: tags tags_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1060,6 +1320,14 @@ ALTER TABLE ONLY app_public.user_levels
 
 ALTER TABLE ONLY app_public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: web_guilds web_guilds_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.web_guilds
+    ADD CONSTRAINT web_guilds_pkey PRIMARY KEY (id);
 
 
 --
@@ -1086,6 +1354,27 @@ CREATE INDEX sessions_user_id_idx ON app_private.sessions USING btree (user_id);
 
 
 --
+-- Name: bans_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX bans_guild_id_idx ON app_public.bans USING btree (guild_id);
+
+
+--
+-- Name: bans_user_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX bans_user_id_idx ON app_public.bans USING btree (user_id);
+
+
+--
+-- Name: cached_guilds_features_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX cached_guilds_features_idx ON app_public.cached_guilds USING gin (features);
+
+
+--
 -- Name: notification_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
 --
 
@@ -1097,6 +1386,34 @@ CREATE INDEX notification_guild_id_idx ON app_public.notifications USING btree (
 --
 
 CREATE INDEX notification_keyword_idx ON app_public.notifications USING btree (keyword);
+
+
+--
+-- Name: rule_counters_guild_id_name_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_counters_guild_id_name_time_idx ON app_public.rule_counters USING btree (guild_id, name, "time" DESC);
+
+
+--
+-- Name: rule_counters_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_counters_time_idx ON app_public.rule_counters USING btree ("time" DESC);
+
+
+--
+-- Name: rule_gauges_guild_id_scope_scope_id_name_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_gauges_guild_id_scope_scope_id_name_time_idx ON app_public.rule_gauges USING btree (guild_id, scope, scope_id, name, "time" DESC);
+
+
+--
+-- Name: rule_gauges_time_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rule_gauges_time_idx ON app_public.rule_gauges USING btree ("time" DESC);
 
 
 --
@@ -1135,6 +1452,20 @@ CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.web_users F
 
 
 --
+-- Name: rule_counters ts_insert_blocker; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER ts_insert_blocker BEFORE INSERT ON app_public.rule_counters FOR EACH ROW EXECUTE FUNCTION _timescaledb_internal.insert_blocker();
+
+
+--
+-- Name: rule_gauges ts_insert_blocker; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER ts_insert_blocker BEFORE INSERT ON app_public.rule_gauges FOR EACH ROW EXECUTE FUNCTION _timescaledb_internal.insert_blocker();
+
+
+--
 -- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: app_private; Owner: -
 --
 
@@ -1167,27 +1498,27 @@ ALTER TABLE ONLY app_public.mutes
 
 
 --
--- Name: guild_configs guild_configs_cached_guild_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+-- Name: guild_rule_sets guild_rule_sets_guild_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
 --
 
-ALTER TABLE ONLY app_public.guild_configs
-    ADD CONSTRAINT guild_configs_cached_guild_fkey FOREIGN KEY (id) REFERENCES app_public.cached_guilds(id);
-
-
---
--- Name: web_user_guilds web_user_guilds_guild_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
---
-
-ALTER TABLE ONLY app_public.web_user_guilds
-    ADD CONSTRAINT web_user_guilds_guild_id_fkey FOREIGN KEY (guild_id) REFERENCES app_public.cached_guilds(id) ON DELETE CASCADE;
+ALTER TABLE ONLY app_public.guild_rule_sets
+    ADD CONSTRAINT guild_rule_sets_guild_id_fkey FOREIGN KEY (guild_id) REFERENCES app_public.cached_guilds(id) ON DELETE CASCADE;
 
 
 --
--- Name: web_user_guilds web_user_guilds_user_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+-- Name: guild_rules guild_rules_guild_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
 --
 
-ALTER TABLE ONLY app_public.web_user_guilds
-    ADD CONSTRAINT web_user_guilds_user_id_fkey FOREIGN KEY (user_id) REFERENCES app_public.web_users(id) ON DELETE CASCADE;
+ALTER TABLE ONLY app_public.guild_rules
+    ADD CONSTRAINT guild_rules_guild_id_fkey FOREIGN KEY (guild_id) REFERENCES app_public.cached_guilds(id) ON DELETE CASCADE;
+
+
+--
+-- Name: guild_rules guild_rules_set_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rules
+    ADD CONSTRAINT guild_rules_set_id_fkey FOREIGN KEY (set_id) REFERENCES app_public.guild_rule_sets(id);
 
 
 --
@@ -1219,6 +1550,18 @@ ALTER TABLE app_public.cached_users ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app_public.guild_configs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: guild_rule_sets; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.guild_rule_sets ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: guild_rules; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.guild_rules ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: cached_guilds select_all; Type: POLICY; Schema: app_public; Owner: -
@@ -1296,6 +1639,12 @@ CREATE POLICY update_self ON app_public.web_users FOR UPDATE USING ((id = app_pu
 ALTER TABLE app_public.user_levels ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: web_guilds; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.web_guilds ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: web_user_guilds; Type: ROW SECURITY; Schema: app_public; Owner: -
 --
 
@@ -1322,11 +1671,35 @@ GRANT USAGE ON SCHEMA app_public TO sushii_visitor;
 
 
 --
+-- Name: FUNCTION current_level_progressed_xp(xp bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.current_level_progressed_xp(xp bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.current_level_progressed_xp(xp bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION has_manage_guild(permissions bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.has_manage_guild(permissions bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.has_manage_guild(permissions bigint) TO sushii_visitor;
+
+
+--
 -- Name: FUNCTION level_from_xp(xp bigint); Type: ACL; Schema: app_hidden; Owner: -
 --
 
 REVOKE ALL ON FUNCTION app_hidden.level_from_xp(xp bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_hidden.level_from_xp(xp bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.level_progress(xp bigint, OUT current_level bigint, OUT next_level_xp_required bigint, OUT next_level_xp_progress bigint) TO sushii_visitor;
 
 
 --
@@ -1351,6 +1724,14 @@ GRANT ALL ON FUNCTION app_hidden.user_levels_filtered(f_timeframe app_hidden.lev
 
 REVOKE ALL ON FUNCTION app_hidden.xp_from_level(level bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_hidden.xp_from_level(level bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION xp_required_to_next_level(xp bigint); Type: ACL; Schema: app_hidden; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_hidden.xp_required_to_next_level(xp bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_hidden.xp_required_to_next_level(xp bigint) TO sushii_visitor;
 
 
 --
@@ -1398,6 +1779,14 @@ GRANT ALL ON FUNCTION app_public."current_user"() TO sushii_visitor;
 
 
 --
+-- Name: FUNCTION current_user_guild_ids(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.current_user_guild_ids() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.current_user_guild_ids() TO sushii_visitor;
+
+
+--
 -- Name: FUNCTION current_user_id(); Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -1411,6 +1800,14 @@ GRANT ALL ON FUNCTION app_public.current_user_id() TO sushii_visitor;
 
 REVOKE ALL ON FUNCTION app_public.current_user_managed_guild_ids() FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.current_user_managed_guild_ids() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION has_manage_guild(permissions bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.has_manage_guild(permissions bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.has_manage_guild(permissions bigint) TO sushii_visitor;
 
 
 --
@@ -1430,13 +1827,6 @@ GRANT ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.leve
 
 
 --
--- Name: TABLE cached_guilds; Type: ACL; Schema: app_public; Owner: -
---
-
-GRANT SELECT ON TABLE app_public.cached_guilds TO sushii_visitor;
-
-
---
 -- Name: TABLE cached_users; Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -1444,10 +1834,32 @@ GRANT SELECT ON TABLE app_public.cached_users TO sushii_visitor;
 
 
 --
+-- Name: FUNCTION user_levels_global_cached_user(user_id bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.user_levels_global_cached_user(user_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.user_levels_global_cached_user(user_id bigint) TO sushii_visitor;
+
+
+--
+-- Name: TABLE cached_guilds; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.cached_guilds TO sushii_visitor;
+
+
+--
 -- Name: TABLE guild_configs; Type: ACL; Schema: app_public; Owner: -
 --
 
 GRANT SELECT ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_configs.id; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(id) ON TABLE app_public.guild_configs TO sushii_visitor;
 
 
 --
@@ -1626,6 +2038,90 @@ GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visi
 
 
 --
+-- Name: TABLE guild_rule_sets; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.name; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(name) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.description; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(description) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(enabled) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.category; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(category) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.config; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(config) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: TABLE guild_rules; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.name; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(name) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(enabled) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.trigger; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(trigger) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.conditions; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(conditions) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.actions; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(actions) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
 -- Name: TABLE tags; Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -1637,6 +2133,13 @@ GRANT SELECT ON TABLE app_public.tags TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.user_levels TO sushii_visitor;
+
+
+--
+-- Name: TABLE web_guilds; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.web_guilds TO sushii_visitor;
 
 
 --

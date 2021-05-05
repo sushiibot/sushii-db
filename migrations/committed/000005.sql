@@ -1,5 +1,5 @@
 --! Previous: sha1:6fe0e4aff8c5e2d5dfaabf1fb96fc8a9503dd27f
---! Hash: sha1:4383f4c53ed3c638753987bd43079979d5022e38
+--! Hash: sha1:9be3da5aadbabc3371dd5c3101280ddadd5b742f
 
 -- postgraphile auth stuff
 -- and other stuff for reworked sushii-web with postgraphile
@@ -346,8 +346,8 @@ create trigger _100_timestamps
 -- should only contain guilds with manage guild permissions
 drop table if exists app_public.web_user_guilds cascade;
 create table app_public.web_user_guilds (
-    user_id     bigint  not null references app_public.web_users     on delete cascade,
-    guild_id    bigint  not null references app_public.cached_guilds on delete cascade,
+    user_id     bigint  not null,
+    guild_id    bigint  not null,
     -- if user is owner of guild
     owner       boolean not null,
     permissions bigint  not null,
@@ -361,6 +361,8 @@ create table app_public.web_user_guilds (
 
 create index on app_public.web_user_guilds(user_id);
 create index on app_public.web_user_guilds(guild_id);
+comment on table app_public.web_user_guilds is
+  E'@foreignKey (user_id) references app_public.web_users (id)\n@foreignKey (guild_id) references app_public.cached_guilds (id)';
 
 -- get all guild ids a user is in where user has managed_guild permission
 -- ignores servers user doesn't have manage_guild in.
@@ -419,12 +421,9 @@ grant update(
 ) on app_public.guild_configs to :DATABASE_VISITOR;
 
 -- add fkey to guild configs to point to cached guild so we can get guild name etc
-alter table app_public.guild_configs
-  drop constraint if exists guild_configs_cached_guild_fkey;
-alter table app_public.guild_configs
-  add constraint guild_configs_cached_guild_fkey
-  foreign key (id)
-  references app_public.cached_guilds(id);
+-- fake fkey since cached guild might not exist
+comment on table app_public.guild_configs is
+  E'@foreignKey (id) references app_public.cached_guilds (id)';
 
 /**********/
 

@@ -41,3 +41,9 @@ GRANT :DATABASE_VISITOR TO :DATABASE_AUTHENTICATOR;
 -- enable uuids
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 ```
+
+# timescaledb support
+
+```sql
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+```

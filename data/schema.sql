@@ -907,6 +907,7 @@ CREATE TABLE app_public.guild_rule_sets (
 CREATE TABLE app_public.guild_rules (
     id uuid NOT NULL,
     set_id uuid NOT NULL,
+    guild_id bigint NOT NULL,
     name text NOT NULL,
     enabled boolean NOT NULL,
     trigger jsonb,
@@ -1429,6 +1430,20 @@ CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.cached_guil
 
 
 --
+-- Name: guild_rule_sets _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.guild_rule_sets FOR EACH ROW EXECUTE FUNCTION app_private.tg__timestamps();
+
+
+--
+-- Name: guild_rules _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.guild_rules FOR EACH ROW EXECUTE FUNCTION app_private.tg__timestamps();
+
+
+--
 -- Name: web_users _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
 --
 
@@ -1487,6 +1502,22 @@ ALTER TABLE ONLY app_public.mutes
 
 ALTER TABLE ONLY app_public.guild_configs
     ADD CONSTRAINT guild_configs_cached_guild_fkey FOREIGN KEY (id) REFERENCES app_public.cached_guilds(id);
+
+
+--
+-- Name: guild_rule_sets guild_rule_sets_guild_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rule_sets
+    ADD CONSTRAINT guild_rule_sets_guild_id_fkey FOREIGN KEY (guild_id) REFERENCES app_public.cached_guilds(id) ON DELETE CASCADE;
+
+
+--
+-- Name: guild_rules guild_rules_guild_id_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_rules
+    ADD CONSTRAINT guild_rules_guild_id_fkey FOREIGN KEY (guild_id) REFERENCES app_public.cached_guilds(id) ON DELETE CASCADE;
 
 
 --
@@ -1588,6 +1619,20 @@ CREATE POLICY select_all ON app_public.user_levels FOR SELECT USING (true);
 --
 
 CREATE POLICY select_managed_guild ON app_public.guild_configs FOR SELECT USING ((id IN ( SELECT app_public.current_user_managed_guild_ids() AS current_user_managed_guild_ids)));
+
+
+--
+-- Name: guild_rule_sets select_managed_guild_rules; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_managed_guild_rules ON app_public.guild_rule_sets USING ((guild_id IN ( SELECT app_public.current_user_managed_guild_ids() AS current_user_managed_guild_ids)));
+
+
+--
+-- Name: guild_rules select_managed_guild_rules; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_managed_guild_rules ON app_public.guild_rules USING ((guild_id IN ( SELECT app_public.current_user_managed_guild_ids() AS current_user_managed_guild_ids)));
 
 
 --
@@ -2027,6 +2072,90 @@ GRANT UPDATE(max_mention) ON TABLE app_public.guild_configs TO sushii_visitor;
 --
 
 GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: TABLE guild_rule_sets; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.name; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(name) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.description; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(description) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(enabled) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.category; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(category) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rule_sets.config; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(config) ON TABLE app_public.guild_rule_sets TO sushii_visitor;
+
+
+--
+-- Name: TABLE guild_rules; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.name; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(name) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.enabled; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(enabled) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.trigger; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(trigger) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.conditions; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(conditions) ON TABLE app_public.guild_rules TO sushii_visitor;
+
+
+--
+-- Name: COLUMN guild_rules.actions; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT UPDATE(actions) ON TABLE app_public.guild_rules TO sushii_visitor;
 
 
 --

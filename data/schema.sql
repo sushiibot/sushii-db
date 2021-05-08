@@ -793,6 +793,19 @@ CREATE TABLE app_public.bans (
 
 
 --
+-- Name: bot_stats; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.bot_stats (
+    name text NOT NULL,
+    category text NOT NULL,
+    count bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: cached_guilds; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -1163,6 +1176,14 @@ ALTER TABLE ONLY app_public.bans
 
 
 --
+-- Name: bot_stats bot_stats_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.bot_stats
+    ADD CONSTRAINT bot_stats_pkey PRIMARY KEY (name, category);
+
+
+--
 -- Name: cached_guilds cached_guilds_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1368,6 +1389,13 @@ CREATE INDEX bans_user_id_idx ON app_public.bans USING btree (user_id);
 
 
 --
+-- Name: bot_stats_category_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX bot_stats_category_idx ON app_public.bot_stats USING btree (category);
+
+
+--
 -- Name: cached_guilds_features_idx; Type: INDEX; Schema: app_public; Owner: -
 --
 
@@ -1435,6 +1463,13 @@ CREATE INDEX web_user_guilds_guild_id_idx ON app_public.web_user_guilds USING bt
 --
 
 CREATE INDEX web_user_guilds_user_id_idx ON app_public.web_user_guilds USING btree (user_id);
+
+
+--
+-- Name: bot_stats _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.bot_stats FOR EACH ROW EXECUTE FUNCTION app_private.tg__timestamps();
 
 
 --
@@ -1534,6 +1569,12 @@ ALTER TABLE app_private.sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app_private.user_authentication_secrets ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: bot_stats; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.bot_stats ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: cached_guilds; Type: ROW SECURITY; Schema: app_public; Owner: -
 --
 
@@ -1603,6 +1644,13 @@ CREATE POLICY select_managed_guild ON app_public.guild_configs FOR SELECT USING 
 --
 
 CREATE POLICY select_self ON app_public.web_users FOR SELECT USING ((id = app_public.current_user_id()));
+
+
+--
+-- Name: bot_stats select_stats; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY select_stats ON app_public.bot_stats FOR SELECT USING (true);
 
 
 --
@@ -1839,6 +1887,13 @@ GRANT SELECT ON TABLE app_public.cached_users TO sushii_visitor;
 
 REVOKE ALL ON FUNCTION app_public.user_levels_global_cached_user(user_id bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.user_levels_global_cached_user(user_id bigint) TO sushii_visitor;
+
+
+--
+-- Name: TABLE bot_stats; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.bot_stats TO sushii_visitor;
 
 
 --

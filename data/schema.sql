@@ -861,6 +861,16 @@ CREATE TABLE app_public.feeds (
 
 
 --
+-- Name: guild_bans; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.guild_bans (
+    guild_id bigint NOT NULL,
+    user_id bigint NOT NULL
+);
+
+
+--
 -- Name: guild_configs; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -890,7 +900,8 @@ CREATE TABLE app_public.guild_configs (
     warn_dm_text text,
     warn_dm_enabled boolean DEFAULT true NOT NULL,
     max_mention integer,
-    disabled_channels bigint[]
+    disabled_channels bigint[],
+    data jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
@@ -899,6 +910,21 @@ CREATE TABLE app_public.guild_configs (
 --
 
 COMMENT ON TABLE app_public.guild_configs IS '@foreignKey (id) references app_public.cached_guilds (id)';
+
+
+--
+-- Name: guild_feeds; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.guild_feeds (
+    guild_id bigint NOT NULL,
+    channel_id bigint NOT NULL,
+    mention_role bigint,
+    feed_name text NOT NULL,
+    feed_source text NOT NULL,
+    feed_hash text GENERATED ALWAYS AS (encode(sha256(((feed_source)::bytea || ((feed_metadata)::text)::bytea)), 'hex'::text)) STORED NOT NULL,
+    feed_metadata jsonb NOT NULL
+);
 
 
 --
@@ -1224,11 +1250,27 @@ ALTER TABLE ONLY app_public.feeds
 
 
 --
+-- Name: guild_bans guild_bans_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_bans
+    ADD CONSTRAINT guild_bans_pkey PRIMARY KEY (guild_id, user_id);
+
+
+--
 -- Name: guild_configs guild_configs_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
 ALTER TABLE ONLY app_public.guild_configs
     ADD CONSTRAINT guild_configs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guild_feeds guild_feeds_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_feeds
+    ADD CONSTRAINT guild_feeds_pkey PRIMARY KEY (feed_hash, channel_id);
 
 
 --
@@ -1400,6 +1442,20 @@ CREATE INDEX bot_stats_category_idx ON app_public.bot_stats USING btree (categor
 --
 
 CREATE INDEX cached_guilds_features_idx ON app_public.cached_guilds USING gin (features);
+
+
+--
+-- Name: guild_bans_user_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX guild_bans_user_id_idx ON app_public.guild_bans USING btree (user_id);
+
+
+--
+-- Name: guild_feeds_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX guild_feeds_guild_id_idx ON app_public.guild_feeds USING btree (guild_id);
 
 
 --

@@ -1004,7 +1004,8 @@ CREATE TABLE app_public.mod_logs (
     user_tag text NOT NULL,
     executor_id bigint,
     reason text,
-    msg_id bigint
+    msg_id bigint,
+    attachments text[] DEFAULT '{}'::text[] NOT NULL
 );
 
 

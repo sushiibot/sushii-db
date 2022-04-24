@@ -47,3 +47,10 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 ```sql
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 ```
+
+# admin role support
+
+```sql
+create role sushii_admin with nologin;
+grant sushii_visitor to sushii_admin;
+```

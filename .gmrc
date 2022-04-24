@@ -64,6 +64,7 @@
   "placeholders": {
     ":DATABASE_VISITOR": "!ENV", // Uses process.env.DATABASE_VISITOR
     ":DATABASE_AUTHENTICATOR": "!ENV",
+    ":DATABASE_ADMIN": "!ENV"
   },
 
   /*
@@ -89,7 +90,7 @@
     "!afterReset.sql" // shorthand syntax ! for running as superuser
     // { "_": "command", "command": "graphile-worker --schema-only" },
   ],
- 
+
   /*
    * afterAllMigrations: actions executed once all migrations are complete.
    */

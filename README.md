@@ -54,3 +54,9 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 create role sushii_admin with nologin;
 grant sushii_visitor to sushii_admin;
 ```
+
+# enable optimized random select
+
+```sql
+create extension tsm_system_rows;
+```

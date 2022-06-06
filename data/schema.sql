@@ -2,8 +2,8 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 12.10
--- Dumped by pg_dump version 12.9 (Ubuntu 12.9-0ubuntu0.20.04.1)
+-- Dumped from database version 14.2
+-- Dumped by pg_dump version 14.3 (Ubuntu 14.3-1.pgdg20.04+1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -102,6 +102,29 @@ CREATE TYPE app_hidden.level_timeframe AS ENUM (
     'DAY',
     'WEEK',
     'MONTH'
+);
+
+
+--
+-- Name: user_guild_rank_result; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.user_guild_rank_result AS (
+	user_id bigint,
+	guild_id bigint,
+	msg_all_time bigint,
+	msg_month bigint,
+	msg_week bigint,
+	msg_day bigint,
+	last_msg timestamp without time zone,
+	msg_all_time_rank bigint,
+	msg_all_time_total bigint,
+	msg_month_rank bigint,
+	msg_month_total bigint,
+	msg_week_rank bigint,
+	msg_week_total bigint,
+	msg_day_rank bigint,
+	msg_day_total bigint
 );
 
 
@@ -573,6 +596,76 @@ $$;
 
 
 --
+-- Name: next_case_id(bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.next_case_id(guild_id bigint) RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select coalesce(max(case_id), 0) + 1 from app_public.mod_logs where guild_id = guild_id;
+$$;
+
+
+--
+-- Name: notifications_starting_with(bigint, text); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.notifications_starting_with(user_id bigint, query text) RETURNS SETOF text
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select keyword
+    from app_public.notifications
+   where user_id = user_id
+         and keyword like query || '%'
+  order by keyword;
+$$;
+
+
+--
+-- Name: tags; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.tags (
+    owner_id bigint NOT NULL,
+    guild_id bigint NOT NULL,
+    tag_name text NOT NULL,
+    content text NOT NULL,
+    use_count bigint NOT NULL,
+    created timestamp without time zone NOT NULL,
+    attachment text
+);
+
+
+--
+-- Name: random_tag(bigint, text, boolean, bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint) RETURNS app_public.tags
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select *
+    from app_public.tags
+   where guild_id = guild_id
+         -- query is **not** required, query is either starts with or contains
+         and (
+           -- if query not provided
+           (query is null or starts_with is null)
+           or
+           -- query starts with
+           (query is not null and starts_with and tag_name like query || '%')
+           or
+           -- query contains
+           (query is not null and not starts_with and tag_name like '%' || query || '%')
+         )
+         -- owner_id is optional
+         and (owner_id = 0 or owner_id = owner_id)
+    -- requires seq scan, not optimized
+    order by random()
+    limit 1;
+$$;
+
+
+--
 -- Name: timeframe_user_levels(app_hidden.level_timeframe, bigint); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
@@ -628,6 +721,78 @@ COMMENT ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_
 
 
 --
+-- Name: user_guild_rank(bigint, bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.user_guild_rank(guild_id bigint, user_id bigint) RETURNS app_public.user_guild_rank_result
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$
+  select user_id,
+         guild_id,
+         msg_all_time,
+         msg_month,
+         msg_week,
+         msg_day,
+         last_msg,
+         msg_all_time_rank,
+         msg_all_time_total,
+         msg_month_rank,
+         msg_month_total,
+         msg_week_rank,
+         msg_week_total,
+         msg_day_rank,
+         msg_day_total
+      from (
+          select *,
+              row_number() over(
+                  partition by extract(doy from last_msg),
+                                extract(year from last_msg)
+                                order by msg_day desc
+              ) as msg_day_rank,
+              (
+                  select count(*)
+                    from app_public.user_levels
+                    where extract(doy  from last_msg) = extract(doy  from now())
+                      and extract(year from last_msg) = extract(year from now())
+                      and guild_id = guild_id
+              ) as msg_day_total,
+
+              row_number() over(
+                  partition by extract(week from last_msg),
+                                extract(year from last_msg)
+                                order by msg_week desc
+              ) as msg_week_rank,
+              (
+                  select count(*)
+                    from app_public.user_levels
+                    where extract(week from last_msg) = extract(week from now())
+                      and extract(year from last_msg) = extract(year from now())
+                      and guild_id = guild_id
+              ) as msg_week_total,
+
+              row_number() over(
+                  partition by extract(month from last_msg),
+                                extract(year from last_msg)
+                                order by msg_month desc
+              ) as msg_month_rank,
+              (
+                  select count(*)
+                    from app_public.user_levels
+                    where extract(month from last_msg) = extract(month from now())
+                      and extract(year  from last_msg) = extract(year  from now())
+                      and guild_id = guild_id
+              ) as msg_month_total,
+
+              row_number() over(order by msg_all_time desc) as msg_all_time_rank,
+              count(*) over() as msg_all_time_total
+          from app_public.user_levels where guild_id = guild_id
+      ) t
+  where t.user_id = user_id
+  limit 1;
+$$;
+
+
+--
 -- Name: snowflake_now(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -656,7 +821,7 @@ CREATE TABLE app_hidden.failures (
 --
 
 CREATE TABLE app_private.sessions (
-    uuid uuid DEFAULT public.gen_random_uuid() NOT NULL,
+    uuid uuid DEFAULT gen_random_uuid() NOT NULL,
     user_id bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     last_active timestamp with time zone DEFAULT now() NOT NULL
@@ -896,20 +1061,6 @@ CREATE TABLE app_public.reminders (
 
 
 --
--- Name: tags; Type: TABLE; Schema: app_public; Owner: -
---
-
-CREATE TABLE app_public.tags (
-    owner_id bigint NOT NULL,
-    guild_id bigint NOT NULL,
-    tag_name text NOT NULL,
-    content text NOT NULL,
-    use_count bigint NOT NULL,
-    created timestamp without time zone NOT NULL
-);
-
-
---
 -- Name: user_levels; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -922,13 +1073,6 @@ CREATE TABLE app_public.user_levels (
     msg_day bigint NOT NULL,
     last_msg timestamp without time zone NOT NULL
 );
-
-
---
--- Name: TABLE user_levels; Type: COMMENT; Schema: app_public; Owner: -
---
-
-COMMENT ON TABLE app_public.user_levels IS '@omit all,filter';
 
 
 --
@@ -1181,6 +1325,13 @@ CREATE INDEX notification_keyword_idx ON app_public.notifications USING btree (k
 
 
 --
+-- Name: notifications_user_id_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX notifications_user_id_idx ON app_public.notifications USING btree (user_id);
+
+
+--
 -- Name: tag_name_idx; Type: INDEX; Schema: app_public; Owner: -
 --
 
@@ -1274,6 +1425,69 @@ ALTER TABLE app_private.sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app_private.user_authentication_secrets ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: guild_configs admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.guild_configs TO sushii_admin USING (true);
+
+
+--
+-- Name: messages admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.messages TO sushii_admin USING (true);
+
+
+--
+-- Name: mod_logs admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.mod_logs TO sushii_admin USING (true);
+
+
+--
+-- Name: mutes admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.mutes TO sushii_admin USING (true);
+
+
+--
+-- Name: notifications admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.notifications TO sushii_admin USING (true);
+
+
+--
+-- Name: reminders admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.reminders TO sushii_admin USING (true);
+
+
+--
+-- Name: tags admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.tags TO sushii_admin USING (true);
+
+
+--
+-- Name: user_levels admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.user_levels TO sushii_admin USING (true);
+
+
+--
+-- Name: users admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.users TO sushii_admin USING (true);
+
+
+--
 -- Name: bot_stats; Type: ROW SECURITY; Schema: app_public; Owner: -
 --
 
@@ -1296,6 +1510,18 @@ ALTER TABLE app_public.cached_users ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app_public.guild_configs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: mod_logs; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.mod_logs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: mutes; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.mutes ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: cached_guilds select_all; Type: POLICY; Schema: app_public; Owner: -
@@ -1396,6 +1622,7 @@ ALTER TABLE app_public.web_users ENABLE ROW LEVEL SECURITY;
 --
 
 GRANT USAGE ON SCHEMA app_hidden TO sushii_visitor;
+GRANT USAGE ON SCHEMA app_hidden TO sushii_admin;
 
 
 --
@@ -1403,6 +1630,7 @@ GRANT USAGE ON SCHEMA app_hidden TO sushii_visitor;
 --
 
 GRANT USAGE ON SCHEMA app_public TO sushii_visitor;
+GRANT USAGE ON SCHEMA app_public TO sushii_admin;
 
 
 --
@@ -1442,6 +1670,7 @@ GRANT ALL ON FUNCTION app_hidden.xp_from_level(level bigint) TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.web_users TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.web_users TO sushii_admin;
 
 
 --
@@ -1506,11 +1735,55 @@ GRANT ALL ON FUNCTION app_public.logout() TO sushii_visitor;
 
 
 --
+-- Name: FUNCTION next_case_id(guild_id bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.next_case_id(guild_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.next_case_id(guild_id bigint) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.next_case_id(guild_id bigint) TO sushii_admin;
+
+
+--
+-- Name: FUNCTION notifications_starting_with(user_id bigint, query text); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.notifications_starting_with(user_id bigint, query text) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.notifications_starting_with(user_id bigint, query text) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.notifications_starting_with(user_id bigint, query text) TO sushii_admin;
+
+
+--
+-- Name: TABLE tags; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT ON TABLE app_public.tags TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.tags TO sushii_admin;
+
+
+--
+-- Name: FUNCTION random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint) TO sushii_admin;
+
+
+--
 -- Name: FUNCTION timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint); Type: ACL; Schema: app_public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION user_guild_rank(guild_id bigint, user_id bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.user_guild_rank(guild_id bigint, user_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.user_guild_rank(guild_id bigint, user_id bigint) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.user_guild_rank(guild_id bigint, user_id bigint) TO sushii_admin;
 
 
 --
@@ -1526,6 +1799,7 @@ GRANT ALL ON FUNCTION public.snowflake_now() TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.bot_stats TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.bot_stats TO sushii_admin;
 
 
 --
@@ -1533,6 +1807,7 @@ GRANT SELECT ON TABLE app_public.bot_stats TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.cached_guilds TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.cached_guilds TO sushii_admin;
 
 
 --
@@ -1540,6 +1815,35 @@ GRANT SELECT ON TABLE app_public.cached_guilds TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.cached_users TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.cached_users TO sushii_admin;
+
+
+--
+-- Name: TABLE feed_items; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.feed_items TO sushii_admin;
+
+
+--
+-- Name: TABLE feed_subscriptions; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.feed_subscriptions TO sushii_admin;
+
+
+--
+-- Name: TABLE feeds; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.feeds TO sushii_admin;
+
+
+--
+-- Name: TABLE guild_bans; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.guild_bans TO sushii_admin;
 
 
 --
@@ -1547,6 +1851,7 @@ GRANT SELECT ON TABLE app_public.cached_users TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.guild_configs TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.guild_configs TO sushii_admin;
 
 
 --
@@ -1725,10 +2030,45 @@ GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visi
 
 
 --
--- Name: TABLE tags; Type: ACL; Schema: app_public; Owner: -
+-- Name: TABLE members; Type: ACL; Schema: app_public; Owner: -
 --
 
-GRANT SELECT ON TABLE app_public.tags TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.members TO sushii_admin;
+
+
+--
+-- Name: TABLE messages; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.messages TO sushii_admin;
+
+
+--
+-- Name: TABLE mod_logs; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.mod_logs TO sushii_admin;
+
+
+--
+-- Name: TABLE mutes; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.mutes TO sushii_admin;
+
+
+--
+-- Name: TABLE notifications; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.notifications TO sushii_admin;
+
+
+--
+-- Name: TABLE reminders; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.reminders TO sushii_admin;
 
 
 --
@@ -1736,6 +2076,14 @@ GRANT SELECT ON TABLE app_public.tags TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.user_levels TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.user_levels TO sushii_admin;
+
+
+--
+-- Name: TABLE users; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.users TO sushii_admin;
 
 
 --
@@ -1743,6 +2091,7 @@ GRANT SELECT ON TABLE app_public.user_levels TO sushii_visitor;
 --
 
 GRANT SELECT ON TABLE app_public.web_user_guilds TO sushii_visitor;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.web_user_guilds TO sushii_admin;
 
 
 --
@@ -1750,6 +2099,7 @@ GRANT SELECT ON TABLE app_public.web_user_guilds TO sushii_visitor;
 --
 
 ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_hidden GRANT SELECT,USAGE ON SEQUENCES  TO sushii_visitor;
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_hidden GRANT SELECT,USAGE ON SEQUENCES  TO sushii_admin;
 
 
 --
@@ -1757,6 +2107,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_hidden GRANT SELECT,USAGE
 --
 
 ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_hidden GRANT ALL ON FUNCTIONS  TO sushii_visitor;
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_hidden GRANT ALL ON FUNCTIONS  TO sushii_admin;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: app_hidden; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_hidden GRANT SELECT,INSERT,DELETE,UPDATE ON TABLES  TO sushii_admin;
 
 
 --
@@ -1764,6 +2122,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_hidden GRANT ALL ON FUNCT
 --
 
 ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_public GRANT SELECT,USAGE ON SEQUENCES  TO sushii_visitor;
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_public GRANT SELECT,USAGE ON SEQUENCES  TO sushii_admin;
 
 
 --
@@ -1771,6 +2130,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_public GRANT SELECT,USAGE
 --
 
 ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_public GRANT ALL ON FUNCTIONS  TO sushii_visitor;
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_public GRANT ALL ON FUNCTIONS  TO sushii_admin;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: app_public; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_public GRANT SELECT,INSERT,DELETE,UPDATE ON TABLES  TO sushii_admin;
 
 
 --
@@ -1778,6 +2145,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA app_public GRANT ALL ON FUNCT
 --
 
 ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA public GRANT SELECT,USAGE ON SEQUENCES  TO sushii_visitor;
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA public GRANT SELECT,USAGE ON SEQUENCES  TO sushii_admin;
 
 
 --
@@ -1785,6 +2153,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA public GRANT SELECT,USAGE ON 
 --
 
 ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA public GRANT ALL ON FUNCTIONS  TO sushii_visitor;
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA public GRANT ALL ON FUNCTIONS  TO sushii_admin;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: public; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE sushii IN SCHEMA public GRANT SELECT,INSERT,DELETE,UPDATE ON TABLES  TO sushii_admin;
 
 
 --

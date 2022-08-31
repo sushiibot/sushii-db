@@ -2,8 +2,8 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 14.2
--- Dumped by pg_dump version 14.3 (Ubuntu 14.3-1.pgdg20.04+1)
+-- Dumped from database version 14.4
+-- Dumped by pg_dump version 14.4 (Ubuntu 14.4-1.pgdg20.04+1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -77,6 +77,20 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 --
 
 COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: tsm_system_rows; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS tsm_system_rows WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION tsm_system_rows; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION tsm_system_rows IS 'TABLESAMPLE method which accepts number of rows as a limit';
 
 
 --
@@ -541,6 +555,19 @@ COMMENT ON FUNCTION app_public."current_user"() IS 'The currently logged in user
 
 
 --
+-- Name: current_user_discord_id(); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.current_user_discord_id() RETURNS bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+    AS $$
+    -- PostgREST format
+    select nullif(pg_catalog.current_setting('request.jwt.claim.discord_user_id', true), '')::bigint;
+$$;
+
+
+--
 -- Name: current_user_id(); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
@@ -574,6 +601,22 @@ CREATE FUNCTION app_public.current_user_managed_guild_ids() RETURNS SETOF bigint
    where user_id = app_public.current_user_id()
      and manage_guild
       or owner;
+$$;
+
+
+--
+-- Name: graphql(text, text, jsonb, jsonb); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.graphql("operationName" text DEFAULT NULL::text, query text DEFAULT NULL::text, variables jsonb DEFAULT NULL::jsonb, extensions jsonb DEFAULT NULL::jsonb) RETURNS jsonb
+    LANGUAGE sql
+    AS $$
+    select graphql.resolve(
+        query := query,
+        variables := coalesce(variables, '{}'),
+        "operationName" := "operationName",
+        extensions := extensions
+    );
 $$;
 
 
@@ -645,7 +688,7 @@ CREATE FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with b
     AS $$
   select *
     from app_public.tags
-   where guild_id = guild_id
+   where guild_id = random_tag.guild_id
          -- query is **not** required, query is either starts with or contains
          and (
            -- if query not provided
@@ -658,7 +701,7 @@ CREATE FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with b
            (query is not null and not starts_with and tag_name like '%' || query || '%')
          )
          -- owner_id is optional
-         and (owner_id = 0 or owner_id = owner_id)
+         and (random_tag.owner_id is null or owner_id = random_tag.owner_id)
     -- requires seq scan, not optimized
     order by random()
     limit 1;
@@ -793,6 +836,22 @@ $$;
 
 
 --
+-- Name: graphql(text, text, jsonb, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.graphql("operationName" text DEFAULT NULL::text, query text DEFAULT NULL::text, variables jsonb DEFAULT NULL::jsonb, extensions jsonb DEFAULT NULL::jsonb) RETURNS jsonb
+    LANGUAGE sql
+    AS $$
+    select graphql.resolve(
+        query := query,
+        variables := coalesce(variables, '{}'),
+        "operationName" := "operationName",
+        extensions := extensions
+    );
+$$;
+
+
+--
 -- Name: snowflake_now(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -821,7 +880,7 @@ CREATE TABLE app_hidden.failures (
 --
 
 CREATE TABLE app_private.sessions (
-    uuid uuid DEFAULT gen_random_uuid() NOT NULL,
+    uuid uuid DEFAULT public.gen_random_uuid() NOT NULL,
     user_id bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     last_active timestamp with time zone DEFAULT now() NOT NULL
@@ -1061,6 +1120,20 @@ CREATE TABLE app_public.reminders (
 
 
 --
+-- Name: role_menus; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.role_menus (
+    guild_id bigint NOT NULL,
+    menu_name text NOT NULL,
+    description text,
+    max_count integer,
+    role_ids bigint[],
+    required_role bigint
+);
+
+
+--
 -- Name: user_levels; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -1210,14 +1283,6 @@ ALTER TABLE ONLY app_public.members
 
 
 --
--- Name: messages messages_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
---
-
-ALTER TABLE ONLY app_public.messages
-    ADD CONSTRAINT messages_pkey PRIMARY KEY (message_id);
-
-
---
 -- Name: mod_logs mod_logs_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1247,6 +1312,14 @@ ALTER TABLE ONLY app_public.notifications
 
 ALTER TABLE ONLY app_public.reminders
     ADD CONSTRAINT reminders_pkey PRIMARY KEY (user_id, set_at);
+
+
+--
+-- Name: role_menus role_menus_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.role_menus
+    ADD CONSTRAINT role_menus_pkey PRIMARY KEY (guild_id, menu_name);
 
 
 --
@@ -1329,6 +1402,20 @@ CREATE INDEX notification_keyword_idx ON app_public.notifications USING btree (k
 --
 
 CREATE INDEX notifications_user_id_idx ON app_public.notifications USING btree (user_id);
+
+
+--
+-- Name: rolemenu_guildid_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rolemenu_guildid_idx ON app_public.role_menus USING btree (guild_id);
+
+
+--
+-- Name: rolemenu_name_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX rolemenu_name_idx ON app_public.role_menus USING btree (menu_name text_pattern_ops);
 
 
 --
@@ -1467,6 +1554,13 @@ CREATE POLICY admin_access ON app_public.reminders TO sushii_admin USING (true);
 
 
 --
+-- Name: role_menus admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.role_menus TO sushii_admin USING (true);
+
+
+--
 -- Name: tags admin_access; Type: POLICY; Schema: app_public; Owner: -
 --
 
@@ -1522,6 +1616,12 @@ ALTER TABLE app_public.mod_logs ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app_public.mutes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: role_menus; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.role_menus ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: cached_guilds select_all; Type: POLICY; Schema: app_public; Owner: -
@@ -1604,6 +1704,12 @@ CREATE POLICY update_self ON app_public.web_users FOR UPDATE USING ((id = app_pu
 --
 
 ALTER TABLE app_public.user_levels ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: users; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.users ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: web_user_guilds; Type: ROW SECURITY; Schema: app_public; Owner: -
@@ -1711,6 +1817,14 @@ GRANT ALL ON FUNCTION app_public."current_user"() TO sushii_visitor;
 
 
 --
+-- Name: FUNCTION current_user_discord_id(); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.current_user_discord_id() FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.current_user_discord_id() TO sushii_visitor;
+
+
+--
 -- Name: FUNCTION current_user_id(); Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -1724,6 +1838,14 @@ GRANT ALL ON FUNCTION app_public.current_user_id() TO sushii_visitor;
 
 REVOKE ALL ON FUNCTION app_public.current_user_managed_guild_ids() FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.current_user_managed_guild_ids() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION graphql("operationName" text, query text, variables jsonb, extensions jsonb); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) TO sushii_visitor;
 
 
 --
@@ -1784,6 +1906,14 @@ GRANT ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.leve
 REVOKE ALL ON FUNCTION app_public.user_guild_rank(guild_id bigint, user_id bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.user_guild_rank(guild_id bigint, user_id bigint) TO sushii_visitor;
 GRANT ALL ON FUNCTION app_public.user_guild_rank(guild_id bigint, user_id bigint) TO sushii_admin;
+
+
+--
+-- Name: FUNCTION graphql("operationName" text, query text, variables jsonb, extensions jsonb); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) TO sushii_visitor;
 
 
 --
@@ -2069,6 +2199,13 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.notifications TO sushii_ad
 --
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.reminders TO sushii_admin;
+
+
+--
+-- Name: TABLE role_menus; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.role_menus TO sushii_admin;
 
 
 --

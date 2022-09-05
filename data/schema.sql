@@ -517,6 +517,34 @@ COMMENT ON FUNCTION app_private.tg__timestamps() IS 'This trigger should be call
 
 
 --
+-- Name: role_menu_roles; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.role_menu_roles (
+    guild_id bigint NOT NULL,
+    menu_name text NOT NULL,
+    role_id bigint NOT NULL,
+    emoji text,
+    description character varying(100)
+);
+
+
+--
+-- Name: add_role_menu_roles(bigint, text, bigint[]); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.add_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) RETURNS SETOF app_public.role_menu_roles
+    LANGUAGE sql
+    AS $$
+  insert into app_public.role_menu_roles (guild_id, menu_name, role_id)
+    select guild_id, menu_name, u.role_id
+      from unnest(role_ids) as u(role_id)
+     on conflict do nothing
+    returning *;
+$$;
+
+
+--
 -- Name: current_session_id(); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
@@ -602,6 +630,21 @@ CREATE FUNCTION app_public.current_user_managed_guild_ids() RETURNS SETOF bigint
      and manage_guild
       or owner;
 $$;
+
+
+--
+-- Name: delete_role_menu_roles(bigint, text, bigint[]); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.delete_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) RETURNS SETOF app_public.role_menu_roles
+    LANGUAGE sql
+    AS $_$
+  delete from app_public.role_menu_roles
+      where guild_id = $1
+        and menu_name = $2
+        and role_id = any($3)
+  returning *;
+$_$;
 
 
 --
@@ -1128,7 +1171,6 @@ CREATE TABLE app_public.role_menus (
     menu_name text NOT NULL,
     description text,
     max_count integer,
-    role_ids bigint[],
     required_role bigint
 );
 
@@ -1312,6 +1354,14 @@ ALTER TABLE ONLY app_public.notifications
 
 ALTER TABLE ONLY app_public.reminders
     ADD CONSTRAINT reminders_pkey PRIMARY KEY (user_id, set_at);
+
+
+--
+-- Name: role_menu_roles role_menu_roles_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.role_menu_roles
+    ADD CONSTRAINT role_menu_roles_pkey PRIMARY KEY (guild_id, menu_name, role_id);
 
 
 --
@@ -1500,6 +1550,14 @@ ALTER TABLE ONLY app_public.mutes
 
 
 --
+-- Name: role_menu_roles role_menu_roles_guild_id_menu_name_fkey; Type: FK CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.role_menu_roles
+    ADD CONSTRAINT role_menu_roles_guild_id_menu_name_fkey FOREIGN KEY (guild_id, menu_name) REFERENCES app_public.role_menus(guild_id, menu_name) ON DELETE CASCADE;
+
+
+--
 -- Name: sessions; Type: ROW SECURITY; Schema: app_private; Owner: -
 --
 
@@ -1551,6 +1609,13 @@ CREATE POLICY admin_access ON app_public.notifications TO sushii_admin USING (tr
 --
 
 CREATE POLICY admin_access ON app_public.reminders TO sushii_admin USING (true);
+
+
+--
+-- Name: role_menu_roles admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.role_menu_roles TO sushii_admin USING (true);
 
 
 --
@@ -1616,6 +1681,12 @@ ALTER TABLE app_public.mod_logs ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app_public.mutes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: role_menu_roles; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.role_menu_roles ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: role_menus; Type: ROW SECURITY; Schema: app_public; Owner: -
@@ -1801,6 +1872,22 @@ REVOKE ALL ON FUNCTION app_private.tg__timestamps() FROM PUBLIC;
 
 
 --
+-- Name: TABLE role_menu_roles; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.role_menu_roles TO sushii_admin;
+
+
+--
+-- Name: FUNCTION add_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.add_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.add_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.add_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) TO sushii_admin;
+
+
+--
 -- Name: FUNCTION current_session_id(); Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -1838,6 +1925,15 @@ GRANT ALL ON FUNCTION app_public.current_user_id() TO sushii_visitor;
 
 REVOKE ALL ON FUNCTION app_public.current_user_managed_guild_ids() FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.current_user_managed_guild_ids() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION delete_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.delete_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.delete_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.delete_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) TO sushii_admin;
 
 
 --

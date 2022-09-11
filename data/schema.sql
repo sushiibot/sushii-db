@@ -525,7 +525,8 @@ CREATE TABLE app_public.role_menu_roles (
     menu_name text NOT NULL,
     role_id bigint NOT NULL,
     emoji text,
-    description character varying(100)
+    description character varying(100),
+    "position" integer
 );
 
 
@@ -535,13 +536,27 @@ CREATE TABLE app_public.role_menu_roles (
 
 CREATE FUNCTION app_public.add_role_menu_roles(guild_id bigint, menu_name text, role_ids bigint[]) RETURNS SETOF app_public.role_menu_roles
     LANGUAGE sql
-    AS $$
-  insert into app_public.role_menu_roles (guild_id, menu_name, role_id)
-    select guild_id, menu_name, u.role_id
-      from unnest(role_ids) as u(role_id)
+    AS $_$
+  insert into app_public.role_menu_roles (guild_id, menu_name, role_id, position)
+    select guild_id, menu_name, u.role_id, u.position
+      from (select
+          unnest(role_ids) as role_id,
+          -- start at the previous max
+          generate_series(
+            (
+            -- start at 1 if there is currently no max, must be 1 to generate correct series length
+            select coalesce(max(position) + 1, 1)
+              from app_public.role_menu_roles
+              where guild_id = $1
+                and menu_name = $2
+            ),
+            -- end series at length of array
+            array_length(role_ids, 1)
+          ) as position
+      ) as u(role_id, position)
      on conflict do nothing
     returning *;
-$$;
+$_$;
 
 
 --
@@ -748,6 +763,25 @@ CREATE FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with b
     -- requires seq scan, not optimized
     order by random()
     limit 1;
+$$;
+
+
+--
+-- Name: set_role_menu_role_order(bigint, text, bigint[]); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.set_role_menu_role_order(guild_id bigint, menu_name text, role_ids bigint[]) RETURNS SETOF app_public.role_menu_roles
+    LANGUAGE sql
+    AS $$
+  update app_public.role_menu_roles
+    set position = u.position
+    from (select
+            unnest(role_ids) as role_id,
+            generate_series(1, array_length(role_ids, 1)) as position
+          ) as u(role_id, position)
+    where app_public.role_menu_roles.role_id = u.role_id
+    -- need to return only the role_menu_roles table, and not the temporary u table
+    returning app_public.role_menu_roles.*;
 $$;
 
 
@@ -1985,6 +2019,15 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.tags TO sushii_admin;
 REVOKE ALL ON FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint) TO sushii_visitor;
 GRANT ALL ON FUNCTION app_public.random_tag(guild_id bigint, query text, starts_with boolean, owner_id bigint) TO sushii_admin;
+
+
+--
+-- Name: FUNCTION set_role_menu_role_order(guild_id bigint, menu_name text, role_ids bigint[]); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.set_role_menu_role_order(guild_id bigint, menu_name text, role_ids bigint[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.set_role_menu_role_order(guild_id bigint, menu_name text, role_ids bigint[]) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.set_role_menu_role_order(guild_id bigint, menu_name text, role_ids bigint[]) TO sushii_admin;
 
 
 --

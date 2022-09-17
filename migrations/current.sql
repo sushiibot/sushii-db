@@ -22,51 +22,69 @@ create table if not exists app_public.level_roles (
   constraint chk_add_before_remove  check (add_level < remove_level)
 );
 
--- Type of level role override, e.g. letting a user keep a role even if they
--- exceed remove_level
--- or preventing a user from receiving a role after they reach the level
-drop type if exists app_public.level_role_override_type cascade;
-create type app_public.level_role_override_type as enum (
-  'grant',
-  'block'
-);
+-- query specific levels for guilds
+create index level_roles_guild_id_add_level_idx on app_public.level_roles(guild_id, add_level);
+create index level_roles_guild_id_remove_level_idx on app_public.level_roles(guild_id, remove_level);
 
--- Table for level role overrides
-drop table if exists app_public.level_role_overrides cascade;
-create table if not exists app_public.level_role_overrides (
-  guild_id bigint not null,
-  role_id  bigint not null,
-  user_id  bigint not null,
-  type     app_public.level_role_override_type not null,
+-- Table for blocked channels
+drop table if exists app_public.xp_blocked_channels cascade;
+create table if not exists app_public.xp_blocked_channels (
+  guild_id           bigint not null,
+  channel_or_role_id bigint not null,
 
-  primary key (guild_id, role_id, user_id),
-  -- delete override if the level role is deleted
-  foreign key (guild_id, role_id)
-    references app_public.level_roles (guild_id, role_id)
-    on delete cascade
+  primary key (guild_id, channel_or_role_id)
 );
 
 -- Custom type for level role response for process to know which roles were
 -- granted or removed
 drop type if exists app_public.user_xp_update_result cascade;
 create type app_public.user_xp_update_result as (
-  role_id bigint,
-  action  text
+  old_level       bigint,
+  new_level       bigint,
+  -- level roles to add/remove
+  add_role_ids    bigint[],
+  remove_role_ids bigint[]
 );
 
 -- Updates a user's XP, resetting any relevant counters and returns any roles to add or to remove
-drop function if exists app_hidden.update_user_xp(
-  guild_id bigint,
-  user_id bigint
+drop function if exists app_public.update_user_xp(
+  guild_id   bigint,
+  channel_id bigint,
+  user_id    bigint,
+  role_ids   bigint[]
 ) cascade;
-create function app_hidden.update_user_xp(
-  guild_id bigint,
-  user_id bigint
-) returns setof app_public.user_xp_update_result as $$
+create function app_public.update_user_xp(
+  guild_id   bigint,
+  channel_id bigint,
+  user_id    bigint,
+  role_ids   bigint[]
+) returns app_public.user_xp_update_result as $$
 #variable_conflict use_column
 declare
+  old_level bigint;
   new_level bigint;
+  new_last_msg timestamp;
+
+  -- level roles to add/remove
+  add_role_ids    bigint[];
+  remove_role_ids bigint[];
 begin
+  -- Ignore any channels or roles that are blocked
+  if exists (
+    select from app_public.xp_blocked_channels
+      where 
+        guild_id = $1
+        and
+        (
+          channel_or_role_id = $2
+          or
+          channel_or_role_id = any($4)
+        )
+  ) then
+    raise notice 'Ignoring XP gain in channel/role % in guild %', $2, $1;
+    return (old_level, new_level, '{}'::bigint[], '{}'::bigint[]);
+  end if;
+
   insert into app_public.user_levels (
     guild_id,
     user_id,
@@ -76,7 +94,7 @@ begin
     msg_day,
     last_msg
   )
-    values ($1, $2, 5, 5, 5, 5, now())
+    values ($1, $3, 5, 5, 5, 5, now())
     on conflict (guild_id, user_id) do update
       set last_msg = now(),
       msg_all_time = app_public.user_levels.msg_all_time + 5,
@@ -105,52 +123,59 @@ begin
         end
       )
       where app_public.user_levels.last_msg < (now() - interval '1 minute')
-    returning level into new_level;
+    returning
+      level,
+      (select level
+        from app_public.user_levels
+        where guild_id = $1
+          and user_id = $3
+      ) as old_level
+      into
+      new_level,
+      old_level;
 
+  -- new_level will be null if the user was not updated
   if new_level is null then
-    return;
+    raise notice 'user % in guild % was not updated (already gained xp within last minute)', $3, $1;
+
+    return (old_level, new_level, '{}'::bigint[], '{}'::bigint[]);
   end if;
 
-  -- Get all level roles that apply to this user
-  return query select
-    app_public.level_roles.role_id,
-    case
-      -- remove first case since we want remove to have priority
-      when remove_level is not null and new_level >= remove_level then 'remove'
-      when add_level is not null    and new_level >= add_level    then 'add'
-    end as action
+  raise notice 'added xp for member %: new_level %, old_level %', user_id, new_level, old_level;
+
+  -- User did not level up, just return
+  if new_level = old_level then
+    return (old_level, new_level, '{}'::bigint[], '{}'::bigint[]);
+  end if;
+
+  raise notice 'user % in guild % leveled up from % to %', $3, $1, old_level, new_level;
+
+  -- Add roles
+  select
+    coalesce(array_agg(role_id), '{}')
+  into
+    add_role_ids
   from app_public.level_roles
-    left outer join app_public.level_role_overrides
-      on app_public.level_roles.guild_id = app_public.level_role_overrides.guild_id
-     and app_public.level_roles.role_id  = app_public.level_role_overrides.role_id
-     and app_public.level_role_overrides.user_id = update_user_xp.user_id
-    where app_public.level_roles.guild_id = $1
-      -- if add_level is defined AND if user does NOT have a 'block' on the role
-      and (
-        app_public.level_roles.add_level is not null
-        and
-        app_public.level_roles.add_level <= new_level
-        and
-        (
-          -- no override for this role, skip
-          app_public.level_role_overrides.type is null
-          or
-          -- override to block the role for this user
-          app_public.level_role_overrides.type != 'block'
-        )
-      )
-      or (
-        app_public.level_roles.remove_level is not null
-        and
-        app_public.level_roles.remove_level > new_level
-        and
-        (
-          -- no override for this role, allow removals
-          app_public.level_role_overrides.type is null
-          or
-          -- override is to grant the role for this user, must be NOT grant to return
-          app_public.level_role_overrides.type != 'grant'
-        )
-      );
+    where
+      app_public.level_roles.guild_id = $1
+      and
+      app_public.level_roles.add_level is not null
+      and
+      app_public.level_roles.add_level = new_level;
+
+  -- Remove roles
+  select
+    coalesce(array_agg(role_id), '{}')
+  into
+    remove_role_ids
+  from app_public.level_roles
+    where
+      app_public.level_roles.guild_id = $1
+      and
+      app_public.level_roles.remove_level is not null
+      and
+      app_public.level_roles.remove_level = new_level;
+
+  return (old_level, new_level, add_role_ids, remove_role_ids);
 end;
 $$ language plpgsql volatile security definer set search_path to pg_catalog, public, app_public, pg_temp;

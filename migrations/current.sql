@@ -26,13 +26,23 @@ create table if not exists app_public.level_roles (
 create index level_roles_guild_id_add_level_idx on app_public.level_roles(guild_id, add_level);
 create index level_roles_guild_id_remove_level_idx on app_public.level_roles(guild_id, remove_level);
 
--- Table for blocked channels
-drop table if exists app_public.xp_blocked_channels cascade;
-create table if not exists app_public.xp_blocked_channels (
-  guild_id           bigint not null,
-  channel_or_role_id bigint not null,
+drop type if exists app_public.block_type cascade;
+create type app_public.block_type as enum (
+  'channel',
+  'role'
+);
 
-  primary key (guild_id, channel_or_role_id)
+-- Table for blocked channels and roles
+drop table if exists app_public.xp_blocks cascade;
+create table if not exists app_public.xp_blocks (
+  guild_id   bigint not null,
+  -- channel or role id
+  block_id   bigint not null,
+  block_type app_public.block_type not null,
+
+  -- technically @everyone and first channel in a server can have the same id
+  -- but you cannot add @everyone as a block, so there will be no conflict
+  primary key (guild_id, block_id)
 );
 
 -- Custom type for level role response for process to know which roles were
@@ -71,14 +81,14 @@ declare
 begin
   -- Ignore any channels or roles that are blocked
   if exists (
-    select from app_public.xp_blocked_channels
+    select from app_public.xp_blocks
       where 
         guild_id = $1
         and
         (
-          channel_or_role_id = $2
+          block_id = $2
           or
-          channel_or_role_id = any($4)
+          block_id = any($4)
         )
   ) then
     raise notice 'Ignoring XP gain in channel/role % in guild %', $2, $1;
@@ -179,3 +189,22 @@ begin
   return (old_level, new_level, add_role_ids, remove_role_ids);
 end;
 $$ language plpgsql volatile security definer set search_path to pg_catalog, public, app_public, pg_temp;
+
+-- 42501 error without this
+grant select on app_public.level_roles to :DATABASE_VISITOR;
+grant select on app_public.xp_blocks   to :DATABASE_VISITOR;
+
+grant select, insert, update, delete on app_public.level_roles to :DATABASE_ADMIN;
+grant select, insert, update, delete on app_public.xp_blocks   to :DATABASE_ADMIN;
+
+alter table app_public.level_roles enable row level security;
+alter table app_public.xp_blocks enable row level security;
+
+-- does not include policy for visitor role
+drop policy if exists admin_access on app_public.level_roles;
+drop policy if exists admin_access on app_public.xp_blocks;
+
+create policy admin_access on app_public.level_roles
+  for all to :DATABASE_ADMIN using (true);
+create policy admin_access on app_public.xp_blocks
+  for all to :DATABASE_ADMIN using (true);

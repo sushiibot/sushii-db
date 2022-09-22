@@ -120,6 +120,26 @@ CREATE TYPE app_hidden.level_timeframe AS ENUM (
 
 
 --
+-- Name: block_type; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.block_type AS ENUM (
+    'channel',
+    'role'
+);
+
+
+--
+-- Name: level_role_override_type; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.level_role_override_type AS ENUM (
+    'grant',
+    'block'
+);
+
+
+--
 -- Name: user_guild_rank_result; Type: TYPE; Schema: app_public; Owner: -
 --
 
@@ -139,6 +159,18 @@ CREATE TYPE app_public.user_guild_rank_result AS (
 	msg_week_total bigint,
 	msg_day_rank bigint,
 	msg_day_total bigint
+);
+
+
+--
+-- Name: user_xp_update_result; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.user_xp_update_result AS (
+	old_level bigint,
+	new_level bigint,
+	add_role_ids bigint[],
+	remove_role_ids bigint[]
 );
 
 
@@ -841,6 +873,136 @@ COMMENT ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_
 
 
 --
+-- Name: update_user_xp(bigint, bigint, bigint, bigint[]); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.update_user_xp(guild_id bigint, channel_id bigint, user_id bigint, role_ids bigint[]) RETURNS app_public.user_xp_update_result
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'app_public', 'pg_temp'
+    AS $_$
+#variable_conflict use_column
+declare
+  old_level bigint;
+  new_level bigint;
+  new_last_msg timestamp;
+
+  -- level roles to add/remove
+  add_role_ids    bigint[];
+  remove_role_ids bigint[];
+begin
+  -- Ignore any channels or roles that are blocked
+  if exists (
+    select from app_public.xp_blocks
+      where 
+        guild_id = $1
+        and
+        (
+          block_id = $2
+          or
+          block_id = any($4)
+        )
+  ) then
+    raise notice 'Ignoring XP gain in channel/role % in guild %', $2, $1;
+    return (old_level, new_level, '{}'::bigint[], '{}'::bigint[]);
+  end if;
+
+  insert into app_public.user_levels (
+    guild_id,
+    user_id,
+    msg_all_time,
+    msg_month,
+    msg_week,
+    msg_day,
+    last_msg
+  )
+    values ($1, $3, 5, 5, 5, 5, now())
+    on conflict (guild_id, user_id) do update
+      set last_msg = now(),
+      msg_all_time = app_public.user_levels.msg_all_time + 5,
+      msg_month = (
+        case
+          when extract(MONTH from app_public.user_levels.last_msg) = extract(MONTH from now())
+           and extract(YEAR  from app_public.user_levels.last_msg) = extract(YEAR  from now())
+            then app_public.user_levels.msg_month + 5
+          else 5
+        end
+      ),
+      msg_week = (
+        case
+          when extract(WEEK from app_public.user_levels.last_msg) = extract(WEEK from now())
+           and extract(YEAR from app_public.user_levels.last_msg) = extract(YEAR from now())
+            then app_public.user_levels.msg_month + 5
+          else 5
+        end
+      ),
+      msg_day = (
+        case
+          when extract(DAY  from app_public.user_levels.last_msg) = extract(DAY  from now())
+           and extract(YEAR from app_public.user_levels.last_msg) = extract(YEAR from now())
+            then app_public.user_levels.msg_month + 5
+          else 5
+        end
+      )
+      where app_public.user_levels.last_msg < (now() - interval '1 minute')
+    returning
+      level,
+      (select level
+        from app_public.user_levels
+        where guild_id = $1
+          and user_id = $3
+      ) as old_level
+      into
+      new_level,
+      old_level;
+
+  -- new_level will be null if the user was not updated
+  if new_level is null then
+    raise notice 'user % in guild % was not updated (already gained xp within last minute)', $3, $1;
+
+    return (old_level, new_level, '{}'::bigint[], '{}'::bigint[]);
+  end if;
+
+  raise notice 'added xp for member %: new_level %, old_level %', user_id, new_level, old_level;
+
+  -- User did not level up, just return
+  if new_level = old_level then
+    return (old_level, new_level, '{}'::bigint[], '{}'::bigint[]);
+  end if;
+
+  raise notice 'user % in guild % leveled up from % to %', $3, $1, old_level, new_level;
+
+  -- Add roles
+  select
+    coalesce(array_agg(role_id), '{}')
+  into
+    add_role_ids
+  from app_public.level_roles
+    where
+      app_public.level_roles.guild_id = $1
+      and
+      app_public.level_roles.add_level is not null
+      and
+      app_public.level_roles.add_level = new_level;
+
+  -- Remove roles
+  select
+    coalesce(array_agg(role_id), '{}')
+  into
+    remove_role_ids
+  from app_public.level_roles
+    where
+      app_public.level_roles.guild_id = $1
+      and
+      app_public.level_roles.remove_level is not null
+      and
+      app_public.level_roles.remove_level = new_level;
+
+  return (old_level, new_level, add_role_ids, remove_role_ids);
+end;
+$_$;
+
+
+--
 -- Name: user_guild_rank(bigint, bigint); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
@@ -1115,6 +1277,32 @@ COMMENT ON TABLE app_public.guild_configs IS '@foreignKey (id) references app_pu
 
 
 --
+-- Name: level_role_overrides; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.level_role_overrides (
+    guild_id bigint NOT NULL,
+    role_id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    type app_public.level_role_override_type NOT NULL
+);
+
+
+--
+-- Name: level_roles; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.level_roles (
+    guild_id bigint NOT NULL,
+    role_id bigint NOT NULL,
+    add_level bigint,
+    remove_level bigint,
+    CONSTRAINT chk_add_before_remove CHECK ((add_level < remove_level)),
+    CONSTRAINT chk_at_least_one_level CHECK ((num_nonnulls(add_level, remove_level) >= 1))
+);
+
+
+--
 -- Name: members; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -1220,7 +1408,8 @@ CREATE TABLE app_public.user_levels (
     msg_month bigint NOT NULL,
     msg_week bigint NOT NULL,
     msg_day bigint NOT NULL,
-    last_msg timestamp without time zone NOT NULL
+    last_msg timestamp without time zone NOT NULL,
+    level bigint GENERATED ALWAYS AS (app_hidden.level_from_xp(msg_all_time)) STORED NOT NULL
 );
 
 
@@ -1260,6 +1449,17 @@ CREATE TABLE app_public.web_user_guilds (
 
 COMMENT ON TABLE app_public.web_user_guilds IS '@foreignKey (user_id) references app_public.web_users (id)
 @foreignKey (guild_id) references app_public.cached_guilds (id)';
+
+
+--
+-- Name: xp_blocks; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.xp_blocks (
+    guild_id bigint NOT NULL,
+    block_id bigint NOT NULL,
+    block_type app_public.block_type NOT NULL
+);
 
 
 --
@@ -1348,6 +1548,22 @@ ALTER TABLE ONLY app_public.guild_bans
 
 ALTER TABLE ONLY app_public.guild_configs
     ADD CONSTRAINT guild_configs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: level_role_overrides level_role_overrides_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.level_role_overrides
+    ADD CONSTRAINT level_role_overrides_pkey PRIMARY KEY (guild_id, role_id, user_id);
+
+
+--
+-- Name: level_roles level_roles_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.level_roles
+    ADD CONSTRAINT level_roles_pkey PRIMARY KEY (guild_id, role_id);
 
 
 --
@@ -1447,6 +1663,14 @@ ALTER TABLE ONLY app_public.web_users
 
 
 --
+-- Name: xp_blocks xp_blocks_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.xp_blocks
+    ADD CONSTRAINT xp_blocks_pkey PRIMARY KEY (guild_id, block_id);
+
+
+--
 -- Name: sessions_user_id_idx; Type: INDEX; Schema: app_private; Owner: -
 --
 
@@ -1465,6 +1689,20 @@ CREATE INDEX bot_stats_category_idx ON app_public.bot_stats USING btree (categor
 --
 
 CREATE INDEX guild_bans_user_id_idx ON app_public.guild_bans USING btree (user_id);
+
+
+--
+-- Name: level_roles_guild_id_add_level_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX level_roles_guild_id_add_level_idx ON app_public.level_roles USING btree (guild_id, add_level);
+
+
+--
+-- Name: level_roles_guild_id_remove_level_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX level_roles_guild_id_remove_level_idx ON app_public.level_roles USING btree (guild_id, remove_level);
 
 
 --
@@ -1611,6 +1849,13 @@ CREATE POLICY admin_access ON app_public.guild_configs TO sushii_admin USING (tr
 
 
 --
+-- Name: level_roles admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.level_roles TO sushii_admin USING (true);
+
+
+--
 -- Name: messages admin_access; Type: POLICY; Schema: app_public; Owner: -
 --
 
@@ -1681,6 +1926,13 @@ CREATE POLICY admin_access ON app_public.users TO sushii_admin USING (true);
 
 
 --
+-- Name: xp_blocks admin_access; Type: POLICY; Schema: app_public; Owner: -
+--
+
+CREATE POLICY admin_access ON app_public.xp_blocks TO sushii_admin USING (true);
+
+
+--
 -- Name: bot_stats; Type: ROW SECURITY; Schema: app_public; Owner: -
 --
 
@@ -1703,6 +1955,12 @@ ALTER TABLE app_public.cached_users ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app_public.guild_configs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: level_roles; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.level_roles ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: mod_logs; Type: ROW SECURITY; Schema: app_public; Owner: -
@@ -1827,6 +2085,12 @@ ALTER TABLE app_public.web_user_guilds ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app_public.web_users ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: xp_blocks; Type: ROW SECURITY; Schema: app_public; Owner: -
+--
+
+ALTER TABLE app_public.xp_blocks ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: SCHEMA app_hidden; Type: ACL; Schema: -; Owner: -
@@ -2036,6 +2300,15 @@ GRANT ALL ON FUNCTION app_public.set_role_menu_role_order(guild_id bigint, menu_
 
 REVOKE ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.timeframe_user_levels(timeframe app_hidden.level_timeframe, guild_id bigint) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION update_user_xp(guild_id bigint, channel_id bigint, user_id bigint, role_ids bigint[]); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.update_user_xp(guild_id bigint, channel_id bigint, user_id bigint, role_ids bigint[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.update_user_xp(guild_id bigint, channel_id bigint, user_id bigint, role_ids bigint[]) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.update_user_xp(guild_id bigint, channel_id bigint, user_id bigint, role_ids bigint[]) TO sushii_admin;
 
 
 --
@@ -2299,6 +2572,21 @@ GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visi
 
 
 --
+-- Name: TABLE level_role_overrides; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.level_role_overrides TO sushii_admin;
+
+
+--
+-- Name: TABLE level_roles; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.level_roles TO sushii_admin;
+GRANT SELECT ON TABLE app_public.level_roles TO sushii_visitor;
+
+
+--
 -- Name: TABLE members; Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -2368,6 +2656,14 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.users TO sushii_admin;
 
 GRANT SELECT ON TABLE app_public.web_user_guilds TO sushii_visitor;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.web_user_guilds TO sushii_admin;
+
+
+--
+-- Name: TABLE xp_blocks; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.xp_blocks TO sushii_admin;
+GRANT SELECT ON TABLE app_public.xp_blocks TO sushii_visitor;
 
 
 --

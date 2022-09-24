@@ -931,7 +931,8 @@ begin
         case
           when extract(WEEK from app_public.user_levels.last_msg) = extract(WEEK from now())
            and extract(YEAR from app_public.user_levels.last_msg) = extract(YEAR from now())
-            then app_public.user_levels.msg_month + 5
+            -- Fix using msg_week instead of msg_month
+            then app_public.user_levels.msg_week + 5
           else 5
         end
       ),
@@ -939,7 +940,7 @@ begin
         case
           when extract(DAY  from app_public.user_levels.last_msg) = extract(DAY  from now())
            and extract(YEAR from app_public.user_levels.last_msg) = extract(YEAR from now())
-            then app_public.user_levels.msg_month + 5
+            then app_public.user_levels.msg_day + 5
           else 5
         end
       )

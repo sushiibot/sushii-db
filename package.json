@@ -1,20 +1,20 @@
 {
-    "name": "sushii-db",
-    "version": "1.0.0",
-    "description": "sushii2 PostgreSQL database migrations",
-    "main": "index.js",
-    "author": "Derrick Lee <derrick@dlee.dev>",
-    "license": "MIT",
-    "scripts": {
-        "gm": "node node_modules/.bin/graphile-migrate",
-        "migrate": "yarn gm migrate",
-        "watch": "yarn gm watch",
-        "commit": "yarn gm commit",
-        "uncommit": "yarn gm uncommit",
-        "reset": "yarn gm reset",
-        "dump": "yarn gm migrate && yarn gm reset --shadow && yarn gm migrate --shadow --force"
-    },
-    "dependencies": {
-        "graphile-migrate": "^1.0.2"
-    }
+  "name": "sushii-db",
+  "version": "1.0.0",
+  "description": "sushii2 PostgreSQL database migrations",
+  "main": "index.js",
+  "author": "Derrick Lee <derrick@dlee.dev>",
+  "license": "MIT",
+  "scripts": {
+    "gm": "node node_modules/.bin/graphile-migrate",
+    "migrate": "yarn gm migrate",
+    "watch": "yarn gm watch",
+    "commit": "yarn gm commit",
+    "uncommit": "yarn gm uncommit",
+    "reset": "yarn gm reset",
+    "dump": "yarn gm migrate && yarn gm reset --shadow && yarn gm migrate --shadow --force"
+  },
+  "dependencies": {
+    "graphile-migrate": "^1.4.0"
+  }
 }

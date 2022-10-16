@@ -62,8 +62,11 @@
    * these.
    */
   "placeholders": {
-    ":DATABASE_VISITOR": "!ENV", // Uses process.env.DATABASE_VISITOR
+    ":DATABASE_OWNER": "!ENV",
+    ":DATABASE_OWNER_PASSWORD": "!ENV",
+    ":DATABASE_VISITOR": "!ENV",
     ":DATABASE_AUTHENTICATOR": "!ENV",
+    ":DATABASE_AUTHENTICATOR_PASSWORD": "!ENV",
     ":DATABASE_ADMIN": "!ENV"
   },
 

@@ -62,8 +62,6 @@
    * these.
    */
   "placeholders": {
-    ":DATABASE_OWNER": "!ENV",
-    ":DATABASE_OWNER_PASSWORD": "!ENV",
     ":DATABASE_VISITOR": "!ENV",
     ":DATABASE_AUTHENTICATOR": "!ENV",
     ":DATABASE_AUTHENTICATOR_PASSWORD": "!ENV",

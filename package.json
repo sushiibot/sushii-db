@@ -8,7 +8,7 @@
   "scripts": {
     "gm": "node node_modules/.bin/graphile-migrate",
     "migrate": "yarn gm migrate",
-    "watch": "yarn gm watch",
+    "watch": "yarn dotenv -- yarn gm watch",
     "commit": "yarn gm commit",
     "uncommit": "yarn gm uncommit",
     "reset": "yarn gm reset",
@@ -16,5 +16,8 @@
   },
   "dependencies": {
     "graphile-migrate": "^1.4.0"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^6.0.0"
   }
 }

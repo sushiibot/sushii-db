@@ -130,6 +130,16 @@ CREATE TYPE app_public.block_type AS ENUM (
 
 
 --
+-- Name: eligible_level_role; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.eligible_level_role AS (
+	user_id bigint,
+	role_ids bigint[]
+);
+
+
+--
 -- Name: level_role_override_type; Type: TYPE; Schema: app_public; Owner: -
 --
 
@@ -691,6 +701,36 @@ CREATE FUNCTION app_public.delete_role_menu_roles(guild_id bigint, menu_name tex
         and menu_name = $2
         and role_id = any($3)
   returning *;
+$_$;
+
+
+--
+-- Name: get_eligible_level_roles(bigint, bigint[]); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.get_eligible_level_roles(guild_id bigint, user_ids bigint[]) RETURNS SETOF app_public.eligible_level_role
+    LANGUAGE sql STABLE
+    AS $_$
+  select user_id, array_agg(role_id) as role_ids
+    from app_public.user_levels
+    join app_public.level_roles
+      on app_public.user_levels.guild_id = app_public.level_roles.guild_id
+    where app_public.user_levels.guild_id = $1
+      -- Only find roles that are eligible to be added
+      and app_public.user_levels.level >= app_public.level_roles.add_level
+      and (
+        -- remove_level is optional
+        app_public.level_roles.remove_level is null
+        or
+        app_public.user_levels.level <  app_public.level_roles.remove_level
+      )
+      and (
+        -- user_ids is optional
+        $2 is null
+        or
+        app_public.user_levels.user_id = any($2)
+      )
+    group by user_id;
 $_$;
 
 
@@ -1278,6 +1318,28 @@ COMMENT ON TABLE app_public.guild_configs IS '@foreignKey (id) references app_pu
 
 
 --
+-- Name: level_role_apply_jobs; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.level_role_apply_jobs (
+    guild_id bigint NOT NULL,
+    interaction_id bigint NOT NULL,
+    notify_user_id bigint NOT NULL,
+    channel_id bigint NOT NULL,
+    message_id bigint NOT NULL,
+    requests_total bigint,
+    requests_processed bigint DEFAULT 0 NOT NULL,
+    members_total bigint NOT NULL,
+    members_skipped bigint DEFAULT 0 NOT NULL,
+    members_applied bigint DEFAULT 0 NOT NULL,
+    members_not_found bigint DEFAULT 0 NOT NULL,
+    members_total_processed bigint GENERATED ALWAYS AS (((members_skipped + members_applied) + members_not_found)) STORED NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: level_role_overrides; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -1552,6 +1614,22 @@ ALTER TABLE ONLY app_public.guild_configs
 
 
 --
+-- Name: level_role_apply_jobs level_role_apply_jobs_interaction_id_key; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.level_role_apply_jobs
+    ADD CONSTRAINT level_role_apply_jobs_interaction_id_key UNIQUE (interaction_id);
+
+
+--
+-- Name: level_role_apply_jobs level_role_apply_jobs_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.level_role_apply_jobs
+    ADD CONSTRAINT level_role_apply_jobs_pkey PRIMARY KEY (guild_id);
+
+
+--
 -- Name: level_role_overrides level_role_overrides_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1777,6 +1855,13 @@ CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.cached_guil
 
 
 --
+-- Name: level_role_apply_jobs _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
+--
+
+CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.level_role_apply_jobs FOR EACH ROW EXECUTE FUNCTION app_private.tg__timestamps();
+
+
+--
 -- Name: web_users _100_timestamps; Type: TRIGGER; Schema: app_public; Owner: -
 --
 
@@ -1827,7 +1912,7 @@ ALTER TABLE ONLY app_public.mutes
 --
 
 ALTER TABLE ONLY app_public.role_menu_roles
-    ADD CONSTRAINT role_menu_roles_guild_id_menu_name_fkey FOREIGN KEY (guild_id, menu_name) REFERENCES app_public.role_menus(guild_id, menu_name) ON DELETE CASCADE;
+    ADD CONSTRAINT role_menu_roles_guild_id_menu_name_fkey FOREIGN KEY (guild_id, menu_name) REFERENCES app_public.role_menus(guild_id, menu_name) ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 --
@@ -2236,6 +2321,15 @@ GRANT ALL ON FUNCTION app_public.delete_role_menu_roles(guild_id bigint, menu_na
 
 
 --
+-- Name: FUNCTION get_eligible_level_roles(guild_id bigint, user_ids bigint[]); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.get_eligible_level_roles(guild_id bigint, user_ids bigint[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.get_eligible_level_roles(guild_id bigint, user_ids bigint[]) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.get_eligible_level_roles(guild_id bigint, user_ids bigint[]) TO sushii_admin;
+
+
+--
 -- Name: FUNCTION graphql("operationName" text, query text, variables jsonb, extensions jsonb); Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -2570,6 +2664,13 @@ GRANT UPDATE(max_mention) ON TABLE app_public.guild_configs TO sushii_visitor;
 --
 
 GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: TABLE level_role_apply_jobs; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.level_role_apply_jobs TO sushii_admin;
 
 
 --

@@ -9,8 +9,8 @@
     "gm": "node node_modules/.bin/graphile-migrate",
     "migrate": "yarn gm migrate",
     "watch": "yarn dotenv -- yarn gm watch",
-    "commit": "yarn gm commit",
-    "uncommit": "yarn gm uncommit",
+    "commit": "yarn dotenv -- yarn gm commit",
+    "uncommit": "yarn dotenv -- yarn gm uncommit",
     "reset": "yarn gm reset",
     "dump": "yarn gm migrate && yarn gm reset --shadow && yarn gm migrate --shadow --force"
   },

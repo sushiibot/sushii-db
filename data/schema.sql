@@ -150,6 +150,17 @@ CREATE TYPE app_public.level_role_override_type AS ENUM (
 
 
 --
+-- Name: msg_log_block_type; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.msg_log_block_type AS ENUM (
+    'edits',
+    'deletes',
+    'all'
+);
+
+
+--
 -- Name: user_guild_rank_result; Type: TYPE; Schema: app_public; Owner: -
 --
 
@@ -1411,6 +1422,17 @@ CREATE TABLE app_public.mod_logs (
 
 
 --
+-- Name: msg_log_blocks; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.msg_log_blocks (
+    guild_id bigint NOT NULL,
+    channel_id bigint NOT NULL,
+    block_type app_public.msg_log_block_type NOT NULL
+);
+
+
+--
 -- Name: mutes; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -1659,6 +1681,14 @@ ALTER TABLE ONLY app_public.members
 
 ALTER TABLE ONLY app_public.mod_logs
     ADD CONSTRAINT mod_logs_pkey PRIMARY KEY (guild_id, case_id);
+
+
+--
+-- Name: msg_log_blocks msg_log_blocks_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.msg_log_blocks
+    ADD CONSTRAINT msg_log_blocks_pkey PRIMARY KEY (guild_id, channel_id);
 
 
 --
@@ -2707,6 +2737,13 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.messages TO sushii_admin;
 --
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.mod_logs TO sushii_admin;
+
+
+--
+-- Name: TABLE msg_log_blocks; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.msg_log_blocks TO sushii_admin;
 
 
 --

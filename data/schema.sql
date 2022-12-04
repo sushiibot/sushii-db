@@ -701,6 +701,23 @@ $$;
 
 
 --
+-- Name: delete_messages_before(timestamp without time zone); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.delete_messages_before(before timestamp without time zone) RETURNS bigint
+    LANGUAGE sql
+    AS $_$
+  with deleted as (
+    delete from app_public.messages
+    where created < $1
+    returning *
+  )
+  select count(*)
+  from deleted
+$_$;
+
+
+--
 -- Name: delete_role_menu_roles(bigint, text, bigint[]); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
@@ -1676,6 +1693,14 @@ ALTER TABLE ONLY app_public.members
 
 
 --
+-- Name: messages messages_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.messages
+    ADD CONSTRAINT messages_pkey PRIMARY KEY (message_id);
+
+
+--
 -- Name: mod_logs mod_logs_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1815,6 +1840,13 @@ CREATE INDEX level_roles_guild_id_remove_level_idx ON app_public.level_roles USI
 
 
 --
+-- Name: messages_created_idx; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX messages_created_idx ON app_public.messages USING btree (created);
+
+
+--
 -- Name: notification_guild_id_idx; Type: INDEX; Schema: app_public; Owner: -
 --
 
@@ -1899,13 +1931,6 @@ CREATE TRIGGER _100_timestamps BEFORE INSERT OR UPDATE ON app_public.web_users F
 
 
 --
--- Name: messages ts_insert_blocker; Type: TRIGGER; Schema: app_public; Owner: -
---
-
-CREATE TRIGGER ts_insert_blocker BEFORE INSERT ON app_public.messages FOR EACH ROW EXECUTE FUNCTION _timescaledb_internal.insert_blocker();
-
-
---
 -- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: app_private; Owner: -
 --
 
@@ -1969,13 +1994,6 @@ CREATE POLICY admin_access ON app_public.guild_configs TO sushii_admin USING (tr
 --
 
 CREATE POLICY admin_access ON app_public.level_roles TO sushii_admin USING (true);
-
-
---
--- Name: messages admin_access; Type: POLICY; Schema: app_public; Owner: -
---
-
-CREATE POLICY admin_access ON app_public.messages TO sushii_admin USING (true);
 
 
 --
@@ -2339,6 +2357,15 @@ GRANT ALL ON FUNCTION app_public.current_user_id() TO sushii_visitor;
 
 REVOKE ALL ON FUNCTION app_public.current_user_managed_guild_ids() FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.current_user_managed_guild_ids() TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION delete_messages_before(before timestamp without time zone); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.delete_messages_before(before timestamp without time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.delete_messages_before(before timestamp without time zone) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.delete_messages_before(before timestamp without time zone) TO sushii_admin;
 
 
 --

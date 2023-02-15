@@ -639,6 +639,21 @@ CREATE TABLE app_public.mod_logs (
 
 
 --
+-- Name: bulk_delete_mod_log(bigint, bigint, bigint); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.bulk_delete_mod_log(guild_id bigint, start_case_id bigint, end_case_id bigint) RETURNS SETOF app_public.mod_logs
+    LANGUAGE sql STRICT
+    AS $_$
+  delete from app_public.mod_logs
+  where guild_id = $1
+    and case_id >= $2 -- start_case_id
+    and case_id <= $3 -- end_case_id
+  returning *;
+$_$;
+
+
+--
 -- Name: bulk_update_mod_log_reason(bigint, bigint, bigint, bigint, text); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
@@ -2422,6 +2437,15 @@ GRANT ALL ON FUNCTION app_public.add_role_menu_roles(guild_id bigint, menu_name 
 --
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.mod_logs TO sushii_admin;
+
+
+--
+-- Name: FUNCTION bulk_delete_mod_log(guild_id bigint, start_case_id bigint, end_case_id bigint); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.bulk_delete_mod_log(guild_id bigint, start_case_id bigint, end_case_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.bulk_delete_mod_log(guild_id bigint, start_case_id bigint, end_case_id bigint) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.bulk_delete_mod_log(guild_id bigint, start_case_id bigint, end_case_id bigint) TO sushii_admin;
 
 
 --

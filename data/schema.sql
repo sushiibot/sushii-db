@@ -147,6 +147,36 @@ CREATE TYPE app_public.eligible_level_role AS (
 
 
 --
+-- Name: emoji_sticker_action_type; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.emoji_sticker_action_type AS ENUM (
+    'message',
+    'reaction'
+);
+
+
+--
+-- Name: guild_asset_type; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.guild_asset_type AS ENUM (
+    'emoji',
+    'sticker'
+);
+
+
+--
+-- Name: emoji_sticker_stat_increment_data; Type: TYPE; Schema: app_public; Owner: -
+--
+
+CREATE TYPE app_public.emoji_sticker_stat_increment_data AS (
+	asset_id bigint,
+	asset_type app_public.guild_asset_type
+);
+
+
+--
 -- Name: level_role_override_type; Type: TYPE; Schema: app_public; Owner: -
 --
 
@@ -654,10 +684,10 @@ $_$;
 
 
 --
--- Name: bulk_update_mod_log_reason(bigint, bigint, bigint, bigint, text); Type: FUNCTION; Schema: app_public; Owner: -
+-- Name: bulk_update_mod_log_reason(bigint, bigint, bigint, bigint, text, boolean); Type: FUNCTION; Schema: app_public; Owner: -
 --
 
-CREATE FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text) RETURNS SETOF app_public.mod_logs
+CREATE FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text, only_empty_reason boolean DEFAULT false) RETURNS SETOF app_public.mod_logs
     LANGUAGE sql STRICT
     AS $_$
   update app_public.mod_logs
@@ -669,6 +699,9 @@ CREATE FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_cas
     and pending = false
     and case_id >= $2 -- start_case_id
     and case_id <= $3 -- end_case_id
+    -- only modify cases without reason if only_empty_reason is true
+    -- only_empty_reason: true - (reason is null)
+    and (not $6 or reason is null)
   returning *;
 $_$;
 
@@ -836,6 +869,43 @@ CREATE FUNCTION app_public.graphql("operationName" text DEFAULT NULL::text, quer
         "operationName" := "operationName",
         extensions := extensions
     );
+$$;
+
+
+--
+-- Name: increment_emoji_sticker_stat(bigint, app_public.emoji_sticker_action_type, app_public.emoji_sticker_stat_increment_data[]); Type: FUNCTION; Schema: app_public; Owner: -
+--
+
+CREATE FUNCTION app_public.increment_emoji_sticker_stat(guild_id bigint, action_type app_public.emoji_sticker_action_type, data app_public.emoji_sticker_stat_increment_data[]) RETURNS void
+    LANGUAGE sql STRICT
+    AS $$
+  insert into app_public.emoji_sticker_stats(
+    time,
+    asset_id,
+    action_type,
+    guild_id,
+    asset_type,
+    count
+  )
+  select
+    date_trunc('minute', now()),
+    t.asset_id,
+    action_type,
+    guild_id,
+    t.asset_type,
+    1
+  from unnest(data) as t(
+    asset_id,
+    asset_type
+  )
+  on conflict (
+    time,
+    asset_id,
+    action_type
+  )
+  -- Increment count if the row already exists
+  do update
+    set count = app_public.emoji_sticker_stats.count + 1;
 $$;
 
 
@@ -1394,6 +1464,21 @@ COMMENT ON TABLE app_public.cached_users IS '@omit all,filter';
 
 
 --
+-- Name: emoji_sticker_stats; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.emoji_sticker_stats (
+    "time" timestamp(0) without time zone NOT NULL,
+    guild_id bigint NOT NULL,
+    asset_id bigint NOT NULL,
+    action_type app_public.emoji_sticker_action_type NOT NULL,
+    asset_type app_public.guild_asset_type NOT NULL,
+    count bigint NOT NULL,
+    CONSTRAINT emoji_sticker_stats_time_check CHECK (("time" = date_trunc('minute'::text, "time")))
+);
+
+
+--
 -- Name: feed_items; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -1726,6 +1811,14 @@ ALTER TABLE ONLY app_public.cached_users
 
 
 --
+-- Name: emoji_sticker_stats emoji_sticker_stats_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.emoji_sticker_stats
+    ADD CONSTRAINT emoji_sticker_stats_pkey PRIMARY KEY ("time", guild_id, asset_id, action_type);
+
+
+--
 -- Name: feed_items feed_items_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1936,6 +2029,13 @@ CREATE INDEX bot_stats_category_idx ON app_public.bot_stats USING btree (categor
 --
 
 CREATE INDEX guild_bans_user_id_idx ON app_public.guild_bans USING btree (user_id);
+
+
+--
+-- Name: idx_action_type; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX idx_action_type ON app_public.emoji_sticker_stats USING btree (action_type, "time");
 
 
 --
@@ -2449,12 +2549,12 @@ GRANT ALL ON FUNCTION app_public.bulk_delete_mod_log(guild_id bigint, start_case
 
 
 --
--- Name: FUNCTION bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text); Type: ACL; Schema: app_public; Owner: -
+-- Name: FUNCTION bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text, only_empty_reason boolean); Type: ACL; Schema: app_public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text) FROM PUBLIC;
-GRANT ALL ON FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text) TO sushii_visitor;
-GRANT ALL ON FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text) TO sushii_admin;
+REVOKE ALL ON FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text, only_empty_reason boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text, only_empty_reason boolean) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.bulk_update_mod_log_reason(guild_id bigint, start_case_id bigint, end_case_id bigint, executor_id bigint, reason text, only_empty_reason boolean) TO sushii_admin;
 
 
 --
@@ -2530,6 +2630,15 @@ GRANT ALL ON FUNCTION app_public.get_eligible_level_roles(guild_id bigint, user_
 
 REVOKE ALL ON FUNCTION app_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) FROM PUBLIC;
 GRANT ALL ON FUNCTION app_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) TO sushii_visitor;
+
+
+--
+-- Name: FUNCTION increment_emoji_sticker_stat(guild_id bigint, action_type app_public.emoji_sticker_action_type, data app_public.emoji_sticker_stat_increment_data[]); Type: ACL; Schema: app_public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app_public.increment_emoji_sticker_stat(guild_id bigint, action_type app_public.emoji_sticker_action_type, data app_public.emoji_sticker_stat_increment_data[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION app_public.increment_emoji_sticker_stat(guild_id bigint, action_type app_public.emoji_sticker_action_type, data app_public.emoji_sticker_stat_increment_data[]) TO sushii_visitor;
+GRANT ALL ON FUNCTION app_public.increment_emoji_sticker_stat(guild_id bigint, action_type app_public.emoji_sticker_action_type, data app_public.emoji_sticker_stat_increment_data[]) TO sushii_admin;
 
 
 --
@@ -2648,6 +2757,13 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.cached_guilds TO sushii_ad
 
 GRANT SELECT ON TABLE app_public.cached_users TO sushii_visitor;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.cached_users TO sushii_admin;
+
+
+--
+-- Name: TABLE emoji_sticker_stats; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.emoji_sticker_stats TO sushii_admin;
 
 
 --

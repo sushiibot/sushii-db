@@ -1,5 +1,5 @@
 --! Previous: sha1:b3b6c937077deba7c86106014a5c939ee0a6d2b6
---! Hash: sha1:2f9816dd4b2fe8fa9f870299a3215ae46e699dbd
+--! Hash: sha1:f90ab5c79fdd3cf67cf5331b7106da7d465abbe6
 
 -- move guild_configs.data.lookup_details_opt_in to it's own column
 
@@ -13,5 +13,5 @@ add column lookup_prompted boolean not null default false;
 
 update app_public.guild_configs
 set
-    lookup_details_opt_in = (data->>'lookup_details_opt_in')::boolean, 
-    lookup_prompted = (data->>'lookup_prompted')::boolean;
+    lookup_details_opt_in = coalesce((data->>'lookup_details_opt_in')::boolean, false),
+    lookup_prompted = coalesce((data->>'lookup_prompted')::boolean, false);

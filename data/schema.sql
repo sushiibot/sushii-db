@@ -1551,7 +1551,9 @@ CREATE TABLE app_public.guild_configs (
     warn_dm_enabled boolean DEFAULT true NOT NULL,
     max_mention integer,
     disabled_channels bigint[],
-    data jsonb DEFAULT '{}'::jsonb NOT NULL
+    data jsonb DEFAULT '{}'::jsonb NOT NULL,
+    lookup_details_opt_in boolean DEFAULT false NOT NULL,
+    lookup_prompted boolean DEFAULT false NOT NULL
 );
 
 

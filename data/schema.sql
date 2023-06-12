@@ -1536,20 +1536,16 @@ CREATE TABLE app_public.guild_configs (
     role_channel bigint,
     role_config jsonb,
     role_enabled boolean DEFAULT true NOT NULL,
-    invite_guard boolean DEFAULT false NOT NULL,
     log_msg bigint,
     log_msg_enabled boolean DEFAULT true NOT NULL,
     log_mod bigint,
     log_mod_enabled boolean DEFAULT true NOT NULL,
     log_member bigint,
     log_member_enabled boolean DEFAULT true NOT NULL,
-    mute_role bigint,
-    mute_duration bigint,
     mute_dm_text text,
     mute_dm_enabled boolean DEFAULT true NOT NULL,
     warn_dm_text text,
     warn_dm_enabled boolean DEFAULT true NOT NULL,
-    max_mention integer,
     disabled_channels bigint[],
     data jsonb DEFAULT '{}'::jsonb NOT NULL,
     lookup_details_opt_in boolean DEFAULT false NOT NULL,
@@ -2875,13 +2871,6 @@ GRANT UPDATE(role_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
 
 
 --
--- Name: COLUMN guild_configs.invite_guard; Type: ACL; Schema: app_public; Owner: -
---
-
-GRANT UPDATE(invite_guard) ON TABLE app_public.guild_configs TO sushii_visitor;
-
-
---
 -- Name: COLUMN guild_configs.log_msg; Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -2924,20 +2913,6 @@ GRANT UPDATE(log_member_enabled) ON TABLE app_public.guild_configs TO sushii_vis
 
 
 --
--- Name: COLUMN guild_configs.mute_role; Type: ACL; Schema: app_public; Owner: -
---
-
-GRANT UPDATE(mute_role) ON TABLE app_public.guild_configs TO sushii_visitor;
-
-
---
--- Name: COLUMN guild_configs.mute_duration; Type: ACL; Schema: app_public; Owner: -
---
-
-GRANT UPDATE(mute_duration) ON TABLE app_public.guild_configs TO sushii_visitor;
-
-
---
 -- Name: COLUMN guild_configs.mute_dm_text; Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -2963,13 +2938,6 @@ GRANT UPDATE(warn_dm_text) ON TABLE app_public.guild_configs TO sushii_visitor;
 --
 
 GRANT UPDATE(warn_dm_enabled) ON TABLE app_public.guild_configs TO sushii_visitor;
-
-
---
--- Name: COLUMN guild_configs.max_mention; Type: ACL; Schema: app_public; Owner: -
---
-
-GRANT UPDATE(max_mention) ON TABLE app_public.guild_configs TO sushii_visitor;
 
 
 --

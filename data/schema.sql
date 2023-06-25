@@ -1536,14 +1536,14 @@ COMMENT ON TABLE app_public.guild_configs IS '@foreignKey (id) references app_pu
 
 
 --
--- Name: guild_emojis; Type: TABLE; Schema: app_public; Owner: -
+-- Name: guild_emojis_and_stickers; Type: TABLE; Schema: app_public; Owner: -
 --
 
-CREATE TABLE app_public.guild_emojis (
+CREATE TABLE app_public.guild_emojis_and_stickers (
     id bigint NOT NULL,
     guild_id bigint NOT NULL,
     name text NOT NULL,
-    external_count bigint DEFAULT 0 NOT NULL
+    type app_public.guild_asset_type NOT NULL
 );
 
 
@@ -1852,11 +1852,11 @@ ALTER TABLE ONLY app_public.guild_configs
 
 
 --
--- Name: guild_emojis guild_emojis_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+-- Name: guild_emojis_and_stickers guild_emojis_and_stickers_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
-ALTER TABLE ONLY app_public.guild_emojis
-    ADD CONSTRAINT guild_emojis_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY app_public.guild_emojis_and_stickers
+    ADD CONSTRAINT guild_emojis_and_stickers_pkey PRIMARY KEY (id);
 
 
 --
@@ -2963,10 +2963,10 @@ GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visi
 
 
 --
--- Name: TABLE guild_emojis; Type: ACL; Schema: app_public; Owner: -
+-- Name: TABLE guild_emojis_and_stickers; Type: ACL; Schema: app_public; Owner: -
 --
 
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.guild_emojis TO sushii_admin;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.guild_emojis_and_stickers TO sushii_admin;
 
 
 --

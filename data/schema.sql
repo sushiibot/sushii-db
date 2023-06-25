@@ -1442,6 +1442,18 @@ CREATE TABLE app_public.emoji_sticker_stats (
 
 
 --
+-- Name: emoji_sticker_stats_rate_limits; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.emoji_sticker_stats_rate_limits (
+    user_id bigint NOT NULL,
+    asset_id bigint NOT NULL,
+    action_type app_public.emoji_sticker_action_type NOT NULL,
+    last_used timestamp without time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+
+--
 -- Name: feed_items; Type: TABLE; Schema: app_public; Owner: -
 --
 
@@ -1521,6 +1533,18 @@ CREATE TABLE app_public.guild_configs (
 --
 
 COMMENT ON TABLE app_public.guild_configs IS '@foreignKey (id) references app_public.cached_guilds (id)';
+
+
+--
+-- Name: guild_emojis; Type: TABLE; Schema: app_public; Owner: -
+--
+
+CREATE TABLE app_public.guild_emojis (
+    id bigint NOT NULL,
+    guild_id bigint NOT NULL,
+    name text NOT NULL,
+    external_count bigint DEFAULT 0 NOT NULL
+);
 
 
 --
@@ -1780,6 +1804,14 @@ ALTER TABLE ONLY app_public.emoji_sticker_stats
 
 
 --
+-- Name: emoji_sticker_stats_rate_limits emoji_sticker_stats_rate_limits_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.emoji_sticker_stats_rate_limits
+    ADD CONSTRAINT emoji_sticker_stats_rate_limits_pkey PRIMARY KEY (user_id, action_type, asset_id);
+
+
+--
 -- Name: feed_items feed_items_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
 --
 
@@ -1817,6 +1849,14 @@ ALTER TABLE ONLY app_public.guild_bans
 
 ALTER TABLE ONLY app_public.guild_configs
     ADD CONSTRAINT guild_configs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guild_emojis guild_emojis_pkey; Type: CONSTRAINT; Schema: app_public; Owner: -
+--
+
+ALTER TABLE ONLY app_public.guild_emojis
+    ADD CONSTRAINT guild_emojis_pkey PRIMARY KEY (id);
 
 
 --
@@ -1983,6 +2023,13 @@ CREATE INDEX sessions_user_id_idx ON app_private.sessions USING btree (user_id);
 --
 
 CREATE INDEX bot_stats_category_idx ON app_public.bot_stats USING btree (category);
+
+
+--
+-- Name: emoji_sticker_stats_rate_limits_idx_last_used; Type: INDEX; Schema: app_public; Owner: -
+--
+
+CREATE INDEX emoji_sticker_stats_rate_limits_idx_last_used ON app_public.emoji_sticker_stats_rate_limits USING btree (last_used);
 
 
 --
@@ -2726,6 +2773,13 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.emoji_sticker_stats TO sus
 
 
 --
+-- Name: TABLE emoji_sticker_stats_rate_limits; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.emoji_sticker_stats_rate_limits TO sushii_admin;
+
+
+--
 -- Name: TABLE feed_items; Type: ACL; Schema: app_public; Owner: -
 --
 
@@ -2906,6 +2960,13 @@ GRANT UPDATE(warn_dm_enabled) ON TABLE app_public.guild_configs TO sushii_visito
 --
 
 GRANT UPDATE(disabled_channels) ON TABLE app_public.guild_configs TO sushii_visitor;
+
+
+--
+-- Name: TABLE guild_emojis; Type: ACL; Schema: app_public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE app_public.guild_emojis TO sushii_admin;
 
 
 --

@@ -1435,8 +1435,8 @@ CREATE TABLE app_public.emoji_sticker_stats (
     guild_id bigint NOT NULL,
     asset_id bigint NOT NULL,
     action_type app_public.emoji_sticker_action_type NOT NULL,
-    asset_type app_public.guild_asset_type NOT NULL,
     count bigint NOT NULL,
+    count_external bigint DEFAULT 0 NOT NULL,
     CONSTRAINT emoji_sticker_stats_time_check CHECK (("time" = date_trunc('day'::text, "time")))
 );
 
@@ -1800,7 +1800,7 @@ ALTER TABLE ONLY app_public.cached_users
 --
 
 ALTER TABLE ONLY app_public.emoji_sticker_stats
-    ADD CONSTRAINT emoji_sticker_stats_pkey PRIMARY KEY ("time", guild_id, asset_id, action_type);
+    ADD CONSTRAINT emoji_sticker_stats_pkey PRIMARY KEY ("time", asset_id, action_type);
 
 
 --

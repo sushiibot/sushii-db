@@ -1,5 +1,5 @@
 --! Previous: sha1:095a6944aa6c704a47ef5d6b2c7c869046ba0d81
---! Hash: sha1:7c9d240e0e8cb6be17908a9a386fd911235497df
+--! Hash: sha1:59a11cb6e4a2c11f01131552a126a2f2446a48f1
 
 -- Add external count for emoji use
 alter table app_public.emoji_sticker_stats
@@ -41,6 +41,13 @@ delete from app_public.emoji_sticker_stats as stats_t
     stats_t.asset_id = guild_emojis_t.id
   and
     guild_emojis_t.guild_id != stats_t.guild_id;
+
+-- Delete emojis that don't sushii doesn't know of
+delete from app_public.emoji_sticker_stats 
+  where asset_id not in (
+    select id
+      from app_public.guild_emojis_and_stickers
+  );
 
 -- Remove guild_id from primary key
 alter table app_public.emoji_sticker_stats

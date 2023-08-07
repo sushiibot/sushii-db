@@ -14,17 +14,21 @@ create type app_public.ban_pool_visibility as enum (
   'private'
 );
 
+-- Whether or not a guild can view or edit another guild's ban pool.
+-- Blocked guilds can't view or edit the pool.
 create type app_public.ban_pool_permission as enum (
   'view',
-  'edit'
+  'edit',
+  'block'
 );
 
+-- Owner pool, whether or not all bans are added automatically, or manually
 create type app_public.ban_pool_add_mode as enum (
   'all_bans',
   'manual'
 );
 
-create type app_public.ban_pool_follower_mode as enum (
+create type app_public.ban_pool_follow_mode as enum (
   'ban',
   'require_confirmation'
 );
@@ -33,7 +37,7 @@ create table app_public.ban_pools (
   guild_id  bigint not null,
   pool_name text   not null,
 
-  add_mode   app_public.ban_pool_add_mode       not null default 'all_bans',
+  add_mode   app_public.ban_pool_add_mode   not null default 'all_bans',
   visibility app_public.ban_pool_visibility not null default 'private',
 
   created_at timestamptz not null default now(),
@@ -50,8 +54,8 @@ create table app_public.ban_pool_members (
 
   -- Invited guilds can view the pool, but not edit it.
   -- Can be changed to 'edit' by pool owner, which lets them add bans.
-  permission    app_public.ban_pool_permission    not null default 'view',
-  follower_mode app_public.ban_pool_follower_mode not null default 'ban',
+  permission  app_public.ban_pool_permission  not null default 'view',
+  follow_mode app_public.ban_pool_follow_mode not null default 'ban',
 
   primary key (owner_guild_id, pool_name, member_guild_id)
 );

@@ -1,15 +1,17 @@
 -- ban pools
 
-drop type if exists app_public.ban_pool_visibility         cascade;
-drop type if exists app_public.ban_pool_permission         cascade;
-drop type if exists app_public.ban_pool_add_mode           cascade;
-drop type if exists app_public.ban_pool_remove_mode        cascade;
+drop type if exists app_public.ban_pool_visibility    cascade;
+drop type if exists app_public.ban_pool_permission    cascade;
+drop type if exists app_public.ban_pool_add_mode      cascade;
+drop type if exists app_public.ban_pool_remove_mode   cascade;
 drop type if exists app_public.ban_pool_add_action    cascade;
 drop type if exists app_public.ban_pool_remove_action cascade;
 
+drop table if exists app_public.ban_pool_guild_settings cascade;
 drop table if exists app_public.ban_pools        cascade;
 drop table if exists app_public.ban_pool_members cascade;
 drop table if exists app_public.ban_pool_entries cascade;
+drop table if exists app_public.ban_pool_invites cascade;
 
 create type app_public.ban_pool_visibility as enum (
   'public',
@@ -21,45 +23,67 @@ create type app_public.ban_pool_visibility as enum (
 create type app_public.ban_pool_permission as enum (
   'view',
   'edit',
-  'block'
+  'blocked'
 );
 
--- When users are added to ban pools for owners/editors:
+-- BAN IN CURRENT GUILD: When users are added to ban pools for owners/editors:
 -- 1. Auto add for all banned users
 -- 2. Manually add users with command or mod log
+-- 3. Nothing, no display on modlogs or prompts - lookup reasons only
 create type app_public.ban_pool_add_mode as enum (
   'all_bans',
-  'manual'
+  'manual',
+  'nothing'
 );
 
--- When to remove users from pool:
+-- UNBAN IN CURRENT GUILD: When to remove users from pool:
 -- 1. Auto remove for all unbanned users in current server.
 -- 2. Only manually removed from pool with command.
+-- 3. Nothing, no display on modlogs or prompts - lookup reasons only
 create type app_public.ban_pool_remove_mode as enum (
   'all_unbans',
-  'manual'
+  'manual',
+  'nothing'
 );
 
--- What to do when a user is added to a pool by another guild, either as follower or owner:
+-- POOL ADD BY OTHER GUILD: What to do when a user is added to  a pool by another guild, either as follower or owner:
 -- 1. Ban users automatically when a user is added to a pool.
--- 2. Send a prompt for confirmation when a user is added to a pool.
+-- 2. Timeout, then ask what to do when a user is added to a pool.
+-- 3. Ask what to do when a user is added to a pool.
+-- 4. Nothing - lookup reasons only
 create type app_public.ban_pool_add_action as enum (
   'ban',
-  'require_confirmation'
+  'timeout_and_ask',
+  'ask',
+  'nothing'
 );
 
--- What to do when a user is removed from a pool by another guild:
+-- POOL REMOVE BY OTHER GUILD: What to do when a user is removed from a pool by another guild:
 -- 1. Unban users automatically when a user is removed from a pool.
--- 2. Send a prompt for confirmation when a user is removed from a pool.
+-- 2. Send a prompt to ask what to do when a user is removed from a pool.
+-- 3. Nothing - lookup reasons only
 create type app_public.ban_pool_remove_action as enum (
   'unban',
-  'require_confirmation'
+  'ask',
+  'nothing'
+);
+
+create table app_public.ban_pool_guild_settings (
+  guild_id         bigint not null,
+  -- Send prompts for ask actions
+  alert_channel_id bigint
 );
 
 create table app_public.ban_pools (
+  -- Unique identifier just for referencing in commands when there's duplicate names
+  id          serial unique,
+
   guild_id    bigint not null,
   pool_name   text   not null,
   description text,
+
+  -- User id of who made this, just useful info for contact purposes
+  creator_id bigint not null,
 
   -- Owner settings
   add_mode    app_public.ban_pool_add_mode    not null default 'all_bans',
@@ -84,11 +108,6 @@ create table app_public.ban_pool_members (
   pool_name       text   not null,
   member_guild_id bigint not null,
 
-  -- Whether or not the invitation has been accepted. Inviting creates a row.
-  -- Only applicable for private pools. Inviting guilds is also only applicable
-  -- for private pools.
-  accepted        boolean not null default false,
-
   -- Invited guilds can view the pool, but not edit it.
   -- Can be changed to 'edit' by pool owner, which lets them add bans.
   permission  app_public.ban_pool_permission  not null default 'view',
@@ -100,6 +119,10 @@ create table app_public.ban_pool_members (
   -- For all pool members with edit/view permissions.
   add_action    app_public.ban_pool_add_action    not null default 'ban',
   remove_action app_public.ban_pool_remove_action not null default 'unban',
+
+  foreign key (owner_guild_id, pool_name)
+    references app_public.ban_pools(guild_id, pool_name)
+    on delete cascade,
 
   primary key (owner_guild_id, pool_name, member_guild_id)
 );
@@ -116,50 +139,30 @@ create table app_public.ban_pool_entries (
   -- Additional reason for ban pool, does not use mod log reason unless imported ?
   reason  text,
 
+  foreign key (owner_guild_id, pool_name)
+    references app_public.ban_pools(guild_id, pool_name)
+    on delete cascade,
+
   primary key (owner_guild_id, pool_name, user_id)
 );
--- lookup groups -- make lookups private within groups
 
-drop table if exists app_public.lookup_groups cascade;
-drop table if exists app_public.lookup_group_members cascade;
-drop table if exists app_public.lookup_group_invites cascade;
-
-create table app_public.lookup_groups (
-  -- For referencing in lists
-  id          serial unique,
-
-  guild_id    bigint not null, -- owner guild
-  name        text not null,
-
-  creator_id  bigint not null, -- group creator for contact/tracking purposes
-  description text,
-
-  -- guilds can have any number of groups but they must have unique names
-  primary key (guild_id, name)
-);
-
--- guilds that are part of the group
-create table app_public.lookup_group_members (
-  owner_guild_id bigint not null,
-  name           text   not null,
-
-  -- member of group
-  member_guild_id bigint not null,
-
-  foreign key (owner_guild_id, name) references app_public.lookup_groups(guild_id, name) on delete cascade,
-  primary key (owner_guild_id, name)
-);
-
+-- from lookup groups -- make lookups private within groups
 -- to join a group, owner creates an invite code
-create table app_public.lookup_group_invites (
+create table app_public.ban_pool_invites (
   owner_guild_id bigint not null,
-  name           text   not null,
+  pool_name      text   not null,
 
-  invite_code text        not null unique,
+  invite_code text      not null unique,
   expires_at  timestamptz,
+  -- null for unlimited uses
+  max_uses    int,
+  -- count of how many times this invite has been used
+  uses        int      not null default 0,
 
-  foreign key (owner_guild_id, name) references app_public.lookup_groups(guild_id, name) on delete cascade,
+  foreign key (owner_guild_id, pool_name)
+    references app_public.ban_pools(guild_id, pool_name)
+    on delete cascade,
 
   -- 1 invite code per group per guild
-  primary key (owner_guild_id, name)
+  primary key (owner_guild_id, pool_name, invite_code)
 )

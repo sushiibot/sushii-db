@@ -13,16 +13,12 @@ drop table if exists app_public.ban_pool_members cascade;
 drop table if exists app_public.ban_pool_entries cascade;
 drop table if exists app_public.ban_pool_invites cascade;
 
-create type app_public.ban_pool_visibility as enum (
-  'public',
-  'private'
-);
-
 -- Whether or not a guild can view or edit another guild's ban pool.
 -- Blocked guilds can't view or edit the pool.
 create type app_public.ban_pool_permission as enum (
-  'view',
+  'owner',
   'edit',
+  'view',
   'blocked'
 );
 
@@ -85,22 +81,16 @@ create table app_public.ban_pools (
   -- User id of who made this, just useful info for contact purposes
   creator_id bigint not null,
 
-  -- Owner settings
-  add_mode    app_public.ban_pool_add_mode    not null default 'all_bans',
-  remove_mode app_public.ban_pool_remove_mode not null default 'all_unbans',
-
-  -- Actions for shared pools, when added/removed by editors
-  add_action    app_public.ban_pool_add_action    not null default 'ban',
-  remove_action app_public.ban_pool_remove_action not null default 'unban',
-
-  -- Follower visibility
-  visibility  app_public.ban_pool_visibility  not null default 'private',
-
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
 
   primary key (guild_id, pool_name)
 );
+
+create trigger _100_timestamps
+  before insert or update on app_public.ban_pools
+  for each row
+  execute procedure app_private.tg__timestamps();
 
 -- Other servers can join ban pools by invitation or public pools
 create table app_public.ban_pool_members (
@@ -127,6 +117,8 @@ create table app_public.ban_pool_members (
   primary key (owner_guild_id, pool_name, member_guild_id)
 );
 
+-- Keep track of all users in a ban pool, potential future use of banning all
+-- existing ban pool users when joining an existing pool
 create table app_public.ban_pool_entries (
   owner_guild_id bigint not null,
   pool_name      text   not null,

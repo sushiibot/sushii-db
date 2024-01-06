@@ -1,5 +1,7 @@
 # sushii-db
 
+Moved to https://github.com/sushiibot/sushii-ts-services
+
 sushii database migrations and database setup.
 
 ## Setup
